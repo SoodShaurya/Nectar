@@ -1,0 +1,140 @@
+<!-- public/index.html -->
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Bot Radar Visualization</title>
+    <style>
+        .radar-container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            padding: 10px;
+        }
+        .bot-radar {
+            border: 1px solid #333;
+        }
+        .legend {
+            position: fixed;
+            right: 10px;
+            top: 10px;
+            background: rgba(0,0,0,0.8);
+            color: white;
+            padding: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="radar-container" id="radarContainer"></div>
+    <div class="legend">
+        <h3>Legend</h3>
+        <div>🟦 Bot</div>
+        <div>🟫 Log</div>
+        <div>💎 Ore</div>
+        <div>🟩 Other</div>
+        <div>➡️ Path</div>
+        <div>⭕ Goal</div>
+    </div>
+    <script>
+        const ws = new WebSocket('ws://localhost:3000');
+        const radarContainer = document.getElementById('radarContainer');
+        const botRadars = new Map();
+
+        const CELL_SIZE = 20;
+        const RADAR_SIZE = 16;
+
+        function createRadarCanvas(botName) {
+            const div = document.createElement('div');
+            div.innerHTML = `<h3>${botName}</h3>`;
+            const canvas = document.createElement('canvas');
+            canvas.width = RADAR_SIZE * CELL_SIZE;
+            canvas.height = RADAR_SIZE * CELL_SIZE;
+            canvas.className = 'bot-radar';
+            div.appendChild(canvas);
+            radarContainer.appendChild(div);
+            return canvas;
+        }
+
+        function drawRadar(canvas, data) {
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Draw grid
+            ctx.strokeStyle = '#ddd';
+            for (let i = 0; i <= RADAR_SIZE; i++) {
+                ctx.beginPath();
+                ctx.moveTo(i * CELL_SIZE, 0);
+                ctx.lineTo(i * CELL_SIZE, canvas.height);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(0, i * CELL_SIZE);
+                ctx.lineTo(canvas.width, i * CELL_SIZE);
+                ctx.stroke();
+            }
+
+            // Draw blocks
+            data.blocks.forEach(block => {
+                const x = (block.relativeX + RADAR_SIZE/2) * CELL_SIZE;
+                const y = (block.relativeZ + RADAR_SIZE/2) * CELL_SIZE;
+                
+                // Color based on height difference from bot
+                const heightDiff = block.y - data.botY;
+                const alpha = Math.min(1, Math.abs(heightDiff) / 10);
+                
+                ctx.fillStyle = getBlockColor(block.type, alpha);
+                ctx.fillRect(x, y, CELL_SIZE, CELL_SIZE);
+                
+                // Add height indicator
+                ctx.fillStyle = '#fff';
+                ctx.font = '10px Arial';
+            });
+
+            // Draw path
+            if (data.path && data.path.length > 0) {
+                ctx.strokeStyle = '#ff0';
+                ctx.beginPath();
+                data.path.forEach((point, i) => {
+                    const x = (point.relativeX + RADAR_SIZE/2) * CELL_SIZE + CELL_SIZE/2;
+                    const y = (point.relativeZ + RADAR_SIZE/2) * CELL_SIZE + CELL_SIZE/2;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                });
+                ctx.stroke();
+            }
+
+            // Draw goal
+            if (data.goal) {
+                const x = (data.goal.relativeX + RADAR_SIZE/2) * CELL_SIZE + CELL_SIZE/2;
+                const y = (data.goal.relativeZ + RADAR_SIZE/2) * CELL_SIZE + CELL_SIZE/2;
+                ctx.strokeStyle = '#f00';
+                ctx.beginPath();
+                ctx.arc(x, y, CELL_SIZE/2, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+
+            // Draw bot
+            ctx.fillStyle = '#00f';
+            ctx.beginPath();
+            ctx.arc(canvas.width/2, canvas.height/2, CELL_SIZE/3, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        function getBlockColor(type, alpha) {
+            switch(type) {
+                case 'log': return `rgba(139, 69, 19, ${alpha})`;
+                case 'ore': return `rgba(0, 255, 255, ${alpha})`;
+                default: return `rgba(0, 255, 0, ${alpha})`;
+            }
+        }
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            let canvas = botRadars.get(data.botName);
+            if (!canvas) {
+                canvas = createRadarCanvas(data.botName);
+                botRadars.set(data.botName, canvas);
+            }
+            drawRadar(canvas, data);
+        };
+    </script>
+</body>
+</html>
