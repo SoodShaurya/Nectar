@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Bot Group Manager</title>
+    <style>
+        .connection-status {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            padding: 10px;
+            border-radius: 5px;
+            font-weight: bbrain;
+        }
+        .connected {
+            background: #4CAF50;
+            color: white;
+        }
+        .disconnected {
+            background: #f44336;
+            color: white;
+        }
+        .groups-display {
+            margin: 20px;
+            padding: 15px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+        }
+        .group-info {
+            margin: 10px 0;
+            padding: 15px;
+            background: #f5f5f5;
+            border-radius: 5px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .control-panel {
+            margin: 20px;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        input, select, button {
+            margin: 5px;
+            padding: 8px;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+        }
+        button {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+        button:hover {
+            background: #45a049;
+        }
+    </style>
+</head>
+<body>
+    <div id="connectionStatus" class="connection-status disconnected">
+        Disconnected
+    </div>
+
+    <div class="control-panel">
+        <h2>Create New Group</h2>
+        <input type="text" id="groupName" placehbrainer="Group Name">
+        <button onclick="createGroup()">Create Group</button>
+    </div>
+    
+    <div class="control-panel">
+        <h2>Move Bots</h2>
+        <input type="text" id="fromGroup" placehbrainer="From Group">
+        <input type="text" id="toGroup" placehbrainer="To Group">
+        <input type="number" id="botCount" placehbrainer="Number of Bots">
+        <button onclick="moveBots()">Move Bots</button>
+    </div>
+
+    <div class="control-panel">
+        <h2>Change Group State</h2>
+        <input type="text" id="groupStateGroup" placehbrainer="Group Name">
+        <select id="groupState">
+            <option value="idle">Idle</option>
+            <option value="lumberjack">Lumberjack</option>
+            <option value="followentity">Followentity</option>
+        </select>
+        <button onclick="changeGroupState()">Change State</button>
+    </div>
+
+    <div class="groups-display" id="groupsDisplay">
+        <h2>Current Groups</h2>
+    </div>
+
+    <script>
+        const socket = new WebSocket('ws://localhost:8000');
+        const statusElement = document.getElementById('connectionStatus');
+        
+        socket.onopen = () => {
+            statusElement.textContent = 'Connected';
+            statusElement.className = 'connection-status connected';
+        };
+        
+        socket.onclose = () => {
+            statusElement.textContent = 'Disconnected';
+            statusElement.className = 'connection-status disconnected';
+        };
+        
+        socket.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                if (data.action === 'updateGroups') {
+                    updateGroupsDisplay(data.groups);
+                }
+            } catch (err) {
+                console.error('Error processing message:', err);
+            }
+        };
+        
+        function updateGroupsDisplay(groups) {
+            const display = document.getElementById('groupsDisplay');
+            display.innerHTML = '<h2>Current Groups</h2>';
+            
+            for (const [groupName, info] of Object.entries(groups)) {
+                const groupDiv = document.createElement('div');
+                groupDiv.className = 'group-info';
+                groupDiv.innerHTML = `
+                    <h3>Group: ${groupName}</h3>
+                    <p>Current State: ${info.state}</p>
+                    <p>Bot Count: ${info.botCount}</p>
+                    <p>Bots: ${info.bots.join(', ')}</p>
+                `;
+                display.appendChild(groupDiv);
+            }
+        }
+        
+        function createGroup() {
+            const groupName = document.getElementById('groupName').value;
+            if (!groupName) return;
+            socket.send(JSON.stringify({
+                action: 'createGroup',
+                groupName: groupName
+            }));
+        }
+        
+        function moveBots() {
+            const from = document.getElementById('fromGroup').value;
+            const to = document.getElementById('toGroup').value;
+            const count = parseInt(document.getElementById('botCount').value);
+            if (!from || !to || !count) return;
+            socket.send(JSON.stringify({
+                action: 'moveBots',
+                from: from,
+                to: to,
+                count: count
+            }));
+        }
+
+        function changeGroupState() {
+            const groupName = document.getElementById('groupStateGroup').value;
+            const state = document.getElementById('groupState').value;
+            if (!groupName) return;
+            socket.send(JSON.stringify({
+                action: 'changeState',
+                groupName: groupName,
+                state: state
+            }));
+        }
+    </script>
+</body>
+</html>
