@@ -1,8 +1,8 @@
 const { parentPort, workerData } = require('worker_threads');
 const { createBot } = require('mineflayer');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
-const lumberjack = require('/Users/shaurya/Documents/dev/bot/hive/src/tasks/lumberjack4.js');
-const idle = require('/Users/shaurya/Documents/dev/bot/hive/src/tasks/idle.js');
+const lumberjack = require('/Users/shaurya/Documents/dev/bot/hive/tasks/lumberjack4.js');
+const idle = require('/Users/shaurya/Documents/dev/bot/hive/tasks/idle.js');
 
 // Create bot instance
 const bot = createBot(workerData.options);

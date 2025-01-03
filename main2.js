@@ -1,12 +1,12 @@
 const { createBot } = require("mineflayer");
-const { CentralHiveMind: manager } = require("/Users/shaurya/Documents/dev/bot/hive/src/brain/manager.js");
-const { changetask } = require("/Users/shaurya/Documents/dev/bot/hive/src/brain/statemachine.js");
-const { groupmanager } = require("/Users/shaurya/Documents/dev/bot/hive/src/brain/groupmanager.js");
+const { CentralHiveMind: manager } = require("/Users/shaurya/Documents/dev/bot/hive/brain/manager.js");
+const { changetask } = require("/Users/shaurya/Documents/dev/bot/hive/brain/statemachine.js");
+const { groupmanager } = require("/Users/shaurya/Documents/dev/bot/hive/brain/groupmanager.js");
 const { pathfinder } = require("mineflayer-pathfinder");
 const { promisify } = require("util");
-const followentity = require("/Users/shaurya/Documents/dev/bot/hive/src/tasks/followentity.js");
-const idle = require("/Users/shaurya/Documents/dev/bot/hive/src/tasks/idle.js");
-const lookatentity = require("/Users/shaurya/Documents/dev/bot/hive/src/tasks/lookatentity.js");
+const followentity = require("/Users/shaurya/Documents/dev/bot/hive/tasks/followentity.js");
+const idle = require("/Users/shaurya/Documents/dev/bot/hive/tasks/idle.js");
+const lookatentity = require("/Users/shaurya/Documents/dev/bot/hive/tasks/lookatentity.js");
 const { createInterface } = require("readline");
 
 const sleep = promisify(setTimeout);

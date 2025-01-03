@@ -1,4 +1,4 @@
-const { task } = require('/Users/shaurya/Documents/dev/bot/hive/src/threaded/statemachine2.js');
+const { task } = require('/Users/shaurya/Documents/dev/bot/hive/threaded/statemachine2.js');
 const Vec3 = require('vec3');
 const { goals } = require('mineflayer-pathfinder');
 const { Movements } = require('mineflayer-pathfinder');

@@ -1,5 +1,5 @@
-const Heuristics = require("./src/heuristics")
-const Goals = require("./src/goals")
+const Heuristics = require("./heuristics")
+const Goals = require("./goals")
 
 module.exports.plugin = function inject(bot) {
     bot.movement           = new Plugin(bot)

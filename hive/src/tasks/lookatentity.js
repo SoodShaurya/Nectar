@@ -1,4 +1,4 @@
-const { taskmanager } = require("/Users/shaurya/Documents/dev/bot/hive/src/brain/statemachine.js");
+const { taskmanager } = require("/Users/shaurya/Documents/dev/bot/hive/brain/statemachine.js");
 
 /**
  * The bot will look at the target entity.

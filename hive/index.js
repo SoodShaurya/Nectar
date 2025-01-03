@@ -1,6 +1,6 @@
-const { manager } = require("./src/manager");
-const { groupmanager } = require("./src/groupmanager");
-const { taskmanager, changetask } = require("./src/statemachine");
+const { manager } = require("./manager");
+const { groupmanager } = require("./groupmanager");
+const { taskmanager, changetask } = require("./statemachine");
 
 
 module.exports = {

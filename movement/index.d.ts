@@ -1,5 +1,5 @@
 import { Bot } from "mineflayer"
-import { Heuristics, Goal } from "./src/heuristics/"
+import { Heuristics, Goal } from "./heuristics/"
 
 declare interface Goals {
     Default: Goal

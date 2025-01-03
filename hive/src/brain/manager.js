@@ -1,5 +1,5 @@
 const EventEmitter = require("events");
-const { groupmanager } = require("/Users/shaurya/Documents/dev/bot/hive/src/brain/groupmanager.js");
+const { groupmanager } = require("/Users/shaurya/Documents/dev/bot/hive/brain/groupmanager.js");
 const { taskmanager, changetask } = require("./statemachine.js");
 
 /**
