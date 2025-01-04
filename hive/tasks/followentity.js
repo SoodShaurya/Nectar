@@ -1,6 +1,6 @@
 const { goals } = require("mineflayer-pathfinder");
 const { Movements } = require('mineflayer-pathfinder');
-const { taskmanager } = require("/Users/shaurya/Documents/dev/bot/hive/brain/statemachine.js");
+const { taskmanager } = require("../brain/statemachine.js");
 
 class followentity extends taskmanager {
     static stateName = "followEntity";

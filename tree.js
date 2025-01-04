@@ -1,15 +1,15 @@
 const { createBot } = require("mineflayer");
-const { CentralHiveMind: manager } = require("/Users/shaurya/Documents/dev/bot/hive/brain/manager.js");
-const { changetask } = require("/Users/shaurya/Documents/dev/bot/hive/brain/statemachine.js");
-const { groupmanager } = require("/Users/shaurya/Documents/dev/bot/hive/brain/groupmanager.js");
+const { CentralHiveMind: manager } = require("./hive/brain/manager.js");
+const { changetask } = require("./hive/brain/statemachine.js");
+const { groupmanager } = require("./hive/brain/groupmanager.js");
 const { pathfinder } = require("mineflayer-pathfinder");
 const { promisify } = require("util");
-const FindTree = require("/Users/shaurya/Documents/dev/bot/hive/tasks/findtree.js");
-const processStump = require("/Users/shaurya/Documents/dev/bot/hive/tasks/choptree.js");
-const idle = require("/Users/shaurya/Documents/dev/bot/hive/tasks/idle.js");
+const FindTree = require("./hive/tasks/findtree.js");
+const processStump = require("./hive/tasks/choptree.js");
+const idle = require("./hive/tasks/idle.js");
 const { createInterface } = require("readline");
-const followentity = require("/Users/shaurya/Documents/dev/bot/hive/tasks/followentity.js");
-const mineBelow = require("/Users/shaurya/Documents/dev/bot/hive/tasks/minetest.js");
+const followentity = require("./hive/tasks/followentity.js");
+const mineBelow = require("./hive/tasks/minetest.js");
 const lumberjack = require("./hive/tasks/lumberjack3.js")
 const sleep = promisify(setTimeout);
 

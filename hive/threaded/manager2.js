@@ -1,5 +1,5 @@
 const { Worker } = require('worker_threads');
-const { GroupManager } = require('/Users/shaurya/Documents/dev/bot/hive/threaded/groupmanager2.js');
+const { GroupManager } = require('./hive/threaded/groupmanager2.js');
 const path = require('path');
 
 class Manager {
@@ -46,7 +46,7 @@ class Manager {
             const botId = `${this.config.botPrefix}${index}`;
             
             // Fix the path by using the correct location
-            const workerPath = '/Users/shaurya/Documents/dev/bot/hive/utils/bot.js';
+            const workerPath = './hive/utils/bot.js';
             
             const worker = new Worker(workerPath, {
                 workerData: {

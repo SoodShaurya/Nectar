@@ -1,7 +1,7 @@
 const { createBot } = require("mineflayer");
-const { Manager } = require("/Users/shaurya/Documents/dev/bot/hive/threaded/manager2.js");
+const { Manager } = require("./hive/threaded/manager2.js");
 const { changetask } = require("./hive/brain/statemachine.js");
-const { groupmanager } = require("/Users/shaurya/Documents/dev/bot/hive/threaded/groupmanager2.js");
+const { groupmanager } = require("./hive/threaded/groupmanager2.js");
 const { pathfinder } = require("mineflayer-pathfinder");
 const { promisify } = require("util");
 const { createInterface } = require("readline");

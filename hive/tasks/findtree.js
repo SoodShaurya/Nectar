@@ -1,6 +1,6 @@
 const minecraftData = require('minecraft-data')
 const mcData = minecraftData('1.21.1')
-const { taskmanager } = require("/Users/shaurya/Documents/dev/bot/hive/brain/statemachine.js");
+const { taskmanager } = require("./hive/brain/statemachine.js");
 
 class FindTreeState extends taskmanager {
     static stateName = "findTree";

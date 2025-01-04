@@ -1,6 +1,6 @@
 const minecraftData = require('minecraft-data');
 const mcData = minecraftData('1.21.1');
-const { taskmanager } = require('/Users/shaurya/Documents/dev/bot/hive/statemachine.js');
+const { taskmanager } = require('../brain/statemachine.js');
 const Vec3 = require('vec3');
 const { goals } = require("mineflayer-pathfinder");
 const { Movements } = require('mineflayer-pathfinder');

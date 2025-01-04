@@ -1,6 +1,6 @@
 const mineflayer = require('mineflayer');
 const { parentPort, workerData } = require('worker_threads');
-const { StateMachine } = require('/Users/shaurya/Documents/dev/bot/hive/threaded/statemachine2.js');
+const { StateMachine } = require('./hive/threaded/statemachine2.js');
 const Vec3 = require('vec3');
 
 // Bot state and configuration

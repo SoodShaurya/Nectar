@@ -1,12 +1,12 @@
 const { createBot } = require("mineflayer");
-const { CentralHiveMind: manager } = require("/Users/shaurya/Documents/dev/bot/hive/brain/manager.js");
-const { changetask } = require("/Users/shaurya/Documents/dev/bot/hive/brain/statemachine.js");
-const { groupmanager } = require("/Users/shaurya/Documents/dev/bot/hive/brain/groupmanager.js");
+const { CentralHiveMind: manager } = require("./hive/brain/manager.js");
+const { changetask } = require("./hive/brain/statemachine.js");
+const { groupmanager } = require("./hive/brain/groupmanager.js");
 const { pathfinder } = require("mineflayer-pathfinder");
 const { promisify } = require("util");
-const idle = require("/Users/shaurya/Documents/dev/bot/hive/tasks/idle.js");
+const idle = require("./hive/tasks/idle.js");
 const lumberjack = require("./hive/tasks/lumberjack3.js");
-const followentity = require("/Users/shaurya/Documents/dev/bot/hive/tasks/followentity.js");
+const followentity = require("./hive/tasks/followentity.js");
 const http = require('http');
 const { WebSocketServer } = require('ws');
 const fs = require('fs');

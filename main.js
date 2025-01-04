@@ -1,5 +1,5 @@
 const mineflayer = require("mineflayer");
-const movement = require("/Users/shaurya/Documents/dev/bot/movement/index.js");
+const movement = require("./movement/index.js");
 const { pathfinder, Movements, goals } = require("mineflayer-pathfinder");
 const { Vec3 } = require("vec3");
 
