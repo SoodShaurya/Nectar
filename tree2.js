@@ -115,8 +115,10 @@ wsServer.on('connection', (ws) => {
                         tgtManager.root.updates[0].trigger();
                     } else if (data.state === 'idle') {
                         tgtManager.root.updates[1].trigger();
-                    } else if (data.state === 'follow') {
+                    } else if (data.state === 'followentity') {
                         tgtManager.root.updates[2].trigger();
+                    } else if (data.state === 'idle after following') {
+                        tgtManager.root.updates[3].trigger();
                     }
                     updateClientGroups(ws);
                 }
@@ -176,34 +178,43 @@ wsServer.on('connection', (ws) => {
                 break;
                 
                 
-            case 'moveBots':
-                const sourceGroup = groups[data.from];
-                const targetGroup = groups[data.to];
-                if (sourceGroup && targetGroup) {
-                    const botsToMove = sourceGroup.getUsableBots().slice(0, data.count);
-                    
-                    if (sourceGroup.activeStateType) {
-                        sourceGroup.exitStates({
-                            stateName: sourceGroup.activeStateType.name,
-                            autonomous: false
-                        });
-                    }
-                    
-                    botsToMove.forEach(bot => {
-                        const index = sourceGroup.bots.indexOf(bot);
-                        if (index !== -1) {
-                            sourceGroup.bots.splice(index, 1);
-                        }
-                    });
-                    
-                    targetGroup.bots.push(...botsToMove);
-                    if (botsToMove.length > 0) {
-                        targetGroup.enterStates(idle, ...botsToMove);
-                        managers[data.to] = new manager(targetGroup.bots, targetGroup);
-                    }
-                    updateClientGroups(ws);
+                case 'moveBots':
+    const sourceGroup = groups[data.from];
+    const targetGroup = groups[data.to];
+    if (sourceGroup && targetGroup) {
+        // Get available bots from source group
+        const availableBots = sourceGroup.getUsableBots();
+        if (availableBots.length >= data.count) {
+            const botsToMove = availableBots.slice(0, data.count);
+            
+            // First exit their current states
+            if (sourceGroup.activeStateType) {
+                sourceGroup.exitStates(sourceGroup.activeStateType);
+            }
+            
+            // Remove from source group
+            botsToMove.forEach(bot => {
+                const index = sourceGroup.bots.findIndex(b => b === bot);
+                if (index !== -1) {
+                    sourceGroup.bots.splice(index, 1);
                 }
-                break;
+            });
+
+            // Add to target group and initialize
+            targetGroup.bots.push(...botsToMove);
+            targetGroup.enterStates(idle, ...botsToMove);
+            
+            // Update manager for target group
+            managers[data.to] = new manager(targetGroup.bots, targetGroup);
+            
+            updateClientGroups(ws);
+        }
+    }
+    break;
+
+
+
+                
         }
     });
 });
