@@ -2,6 +2,8 @@ const fs = require('fs');
 const { get } = require('http');
 const mineflayer = require('mineflayer');
 const { pathfinder, Movements, goals: { GoalNear } } = require('mineflayer-pathfinder');
+const {createBot} = require('mineflayer-viaproxy')
+
 
 const MAIN_PLAYER = 'SlideShows';
 let radius = 3; // Made adjustable
@@ -55,7 +57,7 @@ async function createBotsWithChatControl(filePath) {
       };
       
       try {
-        const bot = mineflayer.createBot(options);
+        const bot = createBot(options);
         bot.loadPlugin(pathfinder);
         bot.isGuarding = false;
         
