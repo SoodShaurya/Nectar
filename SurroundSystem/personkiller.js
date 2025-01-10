@@ -250,7 +250,7 @@ async function createBotsWithChatControl(filePath) {
 }
 
 async function initializeBots() {
-  const bots = await createBotsWithChatControl('accs.txt');
+  const bots = await createBotsWithChatControl('../accs.txt');
   return bots;
 }
 
