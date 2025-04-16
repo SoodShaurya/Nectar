@@ -1,0 +1,20 @@
+{
+  "name": "bot_manager_backend",
+  "version": "1.0.0",
+  "description": "Backend for managing Mineflayer bots",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [
+    "mineflayer",
+    "websocket",
+    "bot"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "mineflayer": "file:../../engine",
+    "ws": "^8.17.0" 
+  }
+}
