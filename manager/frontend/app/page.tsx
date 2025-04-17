@@ -3,148 +3,98 @@
 'use client'; // Required for hooks like useState, useEffect
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { useWebSocket } from '@/hooks/useWebSocket'; // Import the hook
-// We will create these components later
-import BotList from '@/components/BotList'; // Uncommented import
-
-// Define types for clarity (optional but good practice)
-interface Bot {
-    id: string;
-    status: string;
-    activity?: string;
-    // Add other relevant bot properties if needed
-}
+import { useWebSocket, Bot } from '@/hooks/useWebSocket'; // Import the hook and Bot type
+import BotList from '@/components/BotList';
+import BotViewer from '@/components/BotViewer'; // Import the new viewer component
 
 export default function Home() {
     // State for form inputs
-    const [serverAddress, setServerAddress] = useState('');
-    const [serverPort, setServerPort] = useState('25565');
+    const [serverAddress, setServerAddress] = useState('localhost'); // Default to localhost
+    const [serverPort, setServerPort] = useState('6900'); // Default to backend port
     const [username, setUsername] = useState('');
-    const [version, setVersion] = useState('');
+    const [version, setVersion] = useState(''); // e.g., 1.20.1
 
-    // State for application data
-    const [bots, setBots] = useState<Bot[]>([]);
-    const [availableActivities, setAvailableActivities] = useState<string[]>([]);
-    // Removed local isConnected state: const [isConnected, setIsConnected] = useState(false);
+    // State for application data (managed by the hook now)
+    // const [bots, setBots] = useState<Bot[]>([]); // Managed by useWebSocket
+    // const [availableActivities, setAvailableActivities] = useState<string[]>([]); // Managed by useWebSocket
     const [connectionMessage, setConnectionMessage] = useState('Determining WebSocket URL...');
     const [wsUrl, setWsUrl] = useState<string | null>(null);
+    const [viewingBotId, setViewingBotId] = useState<string | null>(null); // State for viewer modal
 
-    // Determine WebSocket URL on client-side mount
+    // Determine WebSocket URL on client-side mount (use current host, fixed port)
     useEffect(() => {
         // This code runs only in the browser
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        // Use hostname and the new fixed port 6900
-        const url = `${protocol}//${window.location.hostname}:6900`;
-        console.log(`WebSocket URL determined: ${url}`);
+        // Construct the URL for the backend Socket.IO server (port 6900)
+        const backendProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const backendHost = window.location.hostname; // Assumes backend is on the same host
+        const backendPort = 6900; // Explicitly use the backend port
+        const url = `${backendProtocol}//${backendHost}:${backendPort}`;
+        console.log(`Manager WebSocket URL determined: ${url}`);
         setWsUrl(url);
-        setConnectionMessage('Connecting to server...'); // Update status message
-    }, []); // Empty dependency array ensures this runs only once on mount
+        setConnectionMessage('Connecting to manager server...');
+    }, []);
 
     // Initialize WebSocket connection using the hook
-    const { sendMessage, lastMessage, isConnected, error } = useWebSocket(wsUrl); // Pass the dynamic URL
+    // The hook now returns the state directly
+    const { bots, activities: availableActivities, isConnected, error, sendMessage } = useWebSocket(wsUrl);
 
     // Update connection message based on hook state
     useEffect(() => {
         if (error) {
-            // Extract a meaningful message from the error event if possible
-            let errorMsg = 'WebSocket error occurred.';
-            if (error instanceof Event && 'message' in error) {
-                 errorMsg = (error as any).message || errorMsg;
-            } else if (typeof error === 'string') {
-                 errorMsg = error;
-            }
-             // Check if it's the max reconnect attempts error
-            if (error.type === 'error' && (error as any).message === 'Maximum reconnect attempts reached.') {
-                errorMsg = 'Connection failed after multiple attempts. Please check the server.';
-            }
-
-            setConnectionMessage(`Error: ${errorMsg}`);
+            // Error is now just a string or null from the hook
+            setConnectionMessage(`Error: ${error}`);
         } else if (isConnected) {
             setConnectionMessage('Connected.');
-            // Clear the message after a short delay or when data arrives
-            const timer = setTimeout(() => setConnectionMessage(''), 2000);
+            // Clear the message after a short delay
+            const timer = setTimeout(() => setConnectionMessage(''), 3000);
             return () => clearTimeout(timer);
         } else if (wsUrl) {
-             // Only show connecting message if URL is set and not yet connected/errored
             setConnectionMessage('Connecting...');
+        } else {
+            setConnectionMessage('Determining server address...'); // Initial state before wsUrl is set
         }
     }, [isConnected, error, wsUrl]);
 
-
-    // Memoize handleServerMessage to avoid re-creating it on every render
-    const handleServerMessage = useCallback((message: any) => {
-        const { type, payload } = message;
-        switch (type) {
-            case 'botListUpdate':
-                setBots(payload);
-                setConnectionMessage(''); // Clear connection message once list is received
-                break;
-            case 'availableActivities':
-                setAvailableActivities(payload);
-                // Note: Re-rendering BotList will happen automatically if 'bots' state changes,
-                // or if BotList/BotItem uses availableActivities directly.
-                break;
-            case 'error':
-                alert(`Server Error: ${payload}`); // Simple error display
-                setConnectionMessage(`Server Error: ${payload}`);
-                break;
-            default:
-                console.log('Unknown message type received:', type);
-        }
-    }, [setBots, setAvailableActivities]); // Dependencies for the callback
-
-     // Effect to process incoming messages
-     useEffect(() => {
-        if (lastMessage) {
-            console.log('Raw message from server:', lastMessage.data);
-            try {
-                // Ensure lastMessage.data is a string before parsing
-                if (typeof lastMessage.data === 'string') {
-                    const message = JSON.parse(lastMessage.data);
-                    handleServerMessage(message);
-                } else {
-                     console.error('Received non-string message data:', lastMessage.data);
-                     setConnectionMessage('Received unexpected data format from server.');
-                }
-            } catch (err) {
-                console.error('Failed to parse server message:', err);
-                // Check if the error is a SyntaxError (likely JSON parse failure)
-                if (err instanceof SyntaxError) {
-                    setConnectionMessage('Received invalid message format from server.');
-                } else {
-                    setConnectionMessage('Error processing server message.');
-                }
-            }
-        }
-    }, [lastMessage, handleServerMessage]); // Re-run when lastMessage or the handler changes
-
+    // No longer need useEffect for lastMessage or handleServerMessage
+    // The hook manages state updates internally via socket event listeners.
 
     const handleCreateBot = useCallback(() => {
         if (!serverAddress || !serverPort || !username) {
-            alert('Please fill in Server Address, Port, and Bot Username.');
+            alert('Please fill in Server Address (use "localhost" for local server), Port, and Bot Username.');
             return;
         }
-        const botData = {
+        const botOptions = {
             host: serverAddress,
             port: parseInt(serverPort, 10),
             username: username,
-            version: version || undefined, // Send undefined if empty
+            version: version || undefined, // Let backend handle default if empty
         };
-        sendMessage('createBot', botData); // Use sendMessage from hook
+        // Emit 'createBot' event with options
+        sendMessage('createBot', botOptions);
         setUsername(''); // Clear username for next bot
-    }, [serverAddress, serverPort, username, version, sendMessage]); // Dependencies
+    }, [serverAddress, serverPort, username, version, sendMessage]);
 
-    // Memoized functions for bot actions (to be passed to BotItem)
+    // Memoized functions for bot actions
     const handleChangeActivity = useCallback((botId: string, activityName: string) => {
-        sendMessage('changeActivity', { botId, activityName }); // Use sendMessage
-    }, [sendMessage]); // Dependency
+        sendMessage('changeActivity', { botId, activityName });
+    }, [sendMessage]);
 
     const handleDeleteBot = useCallback((botId: string) => {
         if (confirm(`Are you sure you want to delete bot ${botId}?`)) {
-            sendMessage('deleteBot', { botId }); // Use sendMessage
+            sendMessage('deleteBot', { botId });
         }
-    }, [sendMessage]); // Dependency
+    }, [sendMessage]);
 
+    // Functions for viewer modal
+    const handleViewBot = useCallback((botId: string) => {
+        console.log("Opening viewer for:", botId);
+        setViewingBotId(botId);
+    }, []);
+
+    const handleCloseViewer = useCallback(() => {
+        console.log("Closing viewer");
+        setViewingBotId(null);
+    }, []);
 
     return (
         <main style={{ padding: '20px', fontFamily: 'sans-serif' }}>
@@ -157,10 +107,10 @@ export default function Home() {
                     <input
                         type="text"
                         id="server-address"
-                        placeholder="e.g., localhost"
+                        placeholder="e.g., localhost or IP"
                         value={serverAddress}
                         onChange={(e) => setServerAddress(e.target.value)}
-                        style={{ marginRight: '10px' }}
+                        style={{ marginRight: '10px', padding: '5px' }}
                     />
                 </div>
                 <div style={{ marginBottom: '10px' }}>
@@ -171,7 +121,7 @@ export default function Home() {
                         placeholder="e.g., 25565"
                         value={serverPort}
                         onChange={(e) => setServerPort(e.target.value)}
-                        style={{ marginRight: '10px' }}
+                        style={{ marginRight: '10px', padding: '5px' }}
                     />
                 </div>
                 <div style={{ marginBottom: '10px' }}>
@@ -182,7 +132,7 @@ export default function Home() {
                         placeholder="e.g., Bot1"
                         value={username}
                         onChange={(e) => setUsername(e.target.value)}
-                        style={{ marginRight: '10px' }}
+                        style={{ marginRight: '10px', padding: '5px' }}
                     />
                 </div>
                 <div style={{ marginBottom: '10px' }}>
@@ -190,38 +140,41 @@ export default function Home() {
                     <input
                         type="text"
                         id="version"
-                        placeholder="e.g., 1.19.4"
+                        placeholder="e.g., 1.20.1"
                         value={version}
                         onChange={(e) => setVersion(e.target.value)}
-                        style={{ marginRight: '10px' }}
+                        style={{ marginRight: '10px', padding: '5px' }}
                     />
                 </div>
-                <button id="create-bot-btn" onClick={handleCreateBot}>Create Bot</button>
+                <button id="create-bot-btn" onClick={handleCreateBot} style={{ padding: '8px 15px' }}>Create Bot</button>
             </div>
 
             <div className="bot-section">
                 <h2>Active Bots</h2>
                 <div id="bot-list">
-                    {/* Display connection status prominently */}
-                    {connectionMessage && connectionMessage !== 'Connected.' && <p style={{ fontStyle: 'italic', color: error ? 'red' : '#555' }}>{connectionMessage}</p>}
+                    {/* Display connection status */}
+                    {connectionMessage && <p style={{ fontStyle: 'italic', color: error ? 'red' : (isConnected ? 'green' : '#555') }}>{connectionMessage}</p>}
 
-                    {/* Display connection status prominently */}
-                    {connectionMessage && connectionMessage !== 'Connected.' && <p style={{ fontStyle: 'italic', color: error ? 'red' : '#555' }}>{connectionMessage}</p>}
-
-                    {/* Use the actual BotList component */}
-                    {isConnected && (
+                    {/* Render BotList only when connected */}
+                    {isConnected ? (
                         <BotList
                             bots={bots}
                             availableActivities={availableActivities}
                             onChangeActivity={handleChangeActivity}
                             onDeleteBot={handleDeleteBot}
-                            isConnected={isConnected} // Pass connection status
+                            onViewBot={handleViewBot} // Pass the view handler
+                            isConnected={isConnected} // Add back the isConnected prop
                         />
+                    ) : (
+                        !error && <p>Attempting to connect to the manager server...</p>
                     )}
-                    {/* Removed temporary rendering logic */}
-                    {!isConnected && !error && <p>Attempting to connect...</p>}
                  </div>
             </div>
+
+            {/* Render the viewer modal conditionally */}
+            {viewingBotId && (
+                <BotViewer botId={viewingBotId} onClose={handleCloseViewer} />
+            )}
         </main>
     );
 }

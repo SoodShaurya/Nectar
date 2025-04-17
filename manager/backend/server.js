@@ -1,8 +1,8 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const WebSocket = require('ws');
-const botManager = require('./botManager'); // We'll create this next
+const { Server } = require("socket.io"); // Use Socket.IO
+const botManager = require('./botManager');
 
 const PORT = process.env.PORT || 6900;
 
@@ -51,72 +51,155 @@ const server = http.createServer((req, res) => {
     });
 });
 
-// --- WebSocket Server ---
-const wss = new WebSocket.Server({ server });
+// --- Socket.IO Server ---
+const io = new Server(server, {
+    cors: {
+      origin: "http://localhost:3000", // Allow frontend origin (adjust if different)
+      methods: ["GET", "POST"]
+    }
+});
 
-console.log(`WebSocket server started on port ${PORT}`);
+console.log(`Socket.IO server started on port ${PORT} with CORS enabled for http://localhost:3000`);
 
-// Function to broadcast messages to all connected clients
+// Function to broadcast messages to all connected clients in the default namespace
 const broadcast = (data) => {
-    const messageString = JSON.stringify(data);
-    wss.clients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN) {
-            client.send(messageString);
-        }
-    });
+    io.emit(data.type, data.payload); // Emit with type as event name, payload as data
 };
 
 // Initialize Bot Manager with broadcast function
 botManager.init(broadcast);
 
-wss.on('connection', (ws) => {
-    console.log('Client connected');
+// --- Default Namespace Logic (for manager UI) ---
+io.on('connection', (socket) => {
+    console.log('Manager client connected:', socket.id);
 
     // Send initial state
-    ws.send(JSON.stringify({ type: 'botListUpdate', payload: botManager.getBotList() }));
-    ws.send(JSON.stringify({ type: 'availableActivities', payload: botManager.getAvailableActivities() }));
+    socket.emit('botListUpdate', botManager.getBotList());
+    socket.emit('availableActivities', botManager.getAvailableActivities());
 
+    // Listen for commands from the manager frontend
+    socket.on('createBot', (payload) => {
+        console.log('Received createBot:', payload);
+        botManager.createBot(payload); // botManager will handle broadcasting updates via broadcast()
+    });
 
-    ws.on('message', (message) => {
-        console.log('Received:', message.toString());
-        try {
-            const parsedMessage = JSON.parse(message.toString());
-            const { type, payload } = parsedMessage;
-
-            switch (type) {
-                case 'createBot':
-                    botManager.createBot(payload); // botManager will handle broadcasting updates
-                    break;
-                case 'deleteBot':
-                    botManager.deleteBot(payload.botId); // botManager will handle broadcasting updates
-                    break;
-                case 'changeActivity':
-                    botManager.changeActivity(payload.botId, payload.activityName); // botManager will handle broadcasting updates
-                    break;
-                case 'getBotList': // Explicit request (though we send on connect)
-                     ws.send(JSON.stringify({ type: 'botListUpdate', payload: botManager.getBotList() }));
-                     break;
-                case 'getActivities': // Explicit request (though we send on connect)
-                     ws.send(JSON.stringify({ type: 'availableActivities', payload: botManager.getAvailableActivities() }));
-                     break;
-                default:
-                    console.log('Unknown message type:', type);
-                    ws.send(JSON.stringify({ type: 'error', payload: `Unknown message type: ${type}` }));
-            }
-        } catch (error) {
-            console.error('Failed to parse message or handle request:', error);
-            ws.send(JSON.stringify({ type: 'error', payload: 'Invalid message format or server error.' }));
+    socket.on('deleteBot', (payload) => {
+        console.log('Received deleteBot:', payload);
+        if (payload && payload.botId) {
+            botManager.deleteBot(payload.botId); // botManager will handle broadcasting updates
+        } else {
+             console.error('Invalid deleteBot payload:', payload);
+             socket.emit('error', 'Invalid deleteBot payload');
         }
     });
 
-    ws.on('close', () => {
-        console.log('Client disconnected');
+    socket.on('changeActivity', (payload) => {
+        console.log('Received changeActivity:', payload);
+         if (payload && payload.botId && payload.activityName) {
+            botManager.changeActivity(payload.botId, payload.activityName); // botManager will handle broadcasting updates
+         } else {
+             console.error('Invalid changeActivity payload:', payload);
+             socket.emit('error', 'Invalid changeActivity payload');
+         }
     });
 
-    ws.on('error', (error) => {
-        console.error('WebSocket error:', error);
+    socket.on('getBotList', () => { // Explicit request
+         console.log('Received getBotList request');
+         socket.emit('botListUpdate', botManager.getBotList());
+    });
+
+    socket.on('getActivities', () => { // Explicit request
+         console.log('Received getActivities request');
+         socket.emit('availableActivities', botManager.getAvailableActivities());
+    });
+
+    socket.on('disconnect', () => {
+        console.log('Manager client disconnected:', socket.id);
+    });
+
+    socket.on('error', (error) => {
+        console.error('Socket.IO error (default namespace):', error);
     });
 });
+
+
+// --- Viewer Namespace Logic ---
+const viewerNamespace = io.of('/viewer');
+const botSockets = {}; // Store mapping from botId to socket id for viewer namespace { botId: socket.id }
+const clientSubscriptions = {}; // Store mapping from client socket id to the botId they are viewing { socket.id: botId }
+
+viewerNamespace.on('connection', (socket) => {
+    console.log('Viewer client/bot connected:', socket.id);
+
+    socket.on('identifyAsBot', ({ botId }) => {
+        if (!botId) return;
+        console.log(`Bot ${botId} identified with socket ${socket.id}`);
+        botSockets[botId] = socket.id;
+        // Optional: Join a room specific to the bot itself? Might not be needed.
+        // socket.join(botId + '-bot');
+    });
+
+    socket.on('identifyAsClient', () => {
+        console.log(`Viewer client identified with socket ${socket.id}`);
+        // No specific action needed on identification, waits for subscription
+    });
+
+    socket.on('subscribeToBot', ({ botId }) => {
+        if (!botId) return;
+        console.log(`Client ${socket.id} subscribing to bot ${botId}`);
+        // Leave previous room if any
+        const previousBotId = clientSubscriptions[socket.id];
+        if (previousBotId) {
+            socket.leave(previousBotId);
+            console.log(`Client ${socket.id} left room ${previousBotId}`);
+        }
+        // Join new room
+        socket.join(botId);
+        clientSubscriptions[socket.id] = botId;
+        console.log(`Client ${socket.id} joined room ${botId}`);
+        // Maybe send initial state if needed? Depends on frontend implementation.
+    });
+
+     socket.on('unsubscribeFromBot', ({ botId }) => {
+        if (!botId) return;
+        console.log(`Client ${socket.id} unsubscribing from bot ${botId}`);
+        socket.leave(botId);
+        if (clientSubscriptions[socket.id] === botId) {
+            delete clientSubscriptions[socket.id];
+        }
+     });
+
+    socket.on('viewerData', ({ botId, payload }) => {
+        if (!botId || !payload) return;
+        // console.log(`Received viewer data from bot ${botId}:`, payload.type); // DEBUG: Can be very noisy
+        // Emit data only to clients subscribed to this specific bot
+        viewerNamespace.to(botId).emit('viewerUpdate', payload);
+    });
+
+    socket.on('disconnect', () => {
+        console.log('Viewer client/bot disconnected:', socket.id);
+        // Check if it was a bot
+        const disconnectedBotId = Object.keys(botSockets).find(key => botSockets[key] === socket.id);
+        if (disconnectedBotId) {
+            console.log(`Bot ${disconnectedBotId} disconnected from viewer namespace.`);
+            delete botSockets[disconnectedBotId];
+            // Optional: Notify subscribed clients that the bot disconnected?
+            // viewerNamespace.to(disconnectedBotId).emit('botDisconnected', { botId: disconnectedBotId });
+        }
+        // Check if it was a client
+        const viewedBotId = clientSubscriptions[socket.id];
+        if (viewedBotId) {
+            console.log(`Client ${socket.id} disconnected while viewing ${viewedBotId}.`);
+            // No need to leave room, socket is gone. Just clean up our tracking.
+            delete clientSubscriptions[socket.id];
+        }
+    });
+
+     socket.on('error', (error) => {
+        console.error('Socket.IO error (viewer namespace):', error);
+    });
+});
+
 
 server.listen(PORT, () => {
     console.log(`HTTP server running on http://localhost:${PORT}`);
@@ -125,10 +208,11 @@ server.listen(PORT, () => {
 // Graceful shutdown
 process.on('SIGINT', () => {
     console.log('Shutting down...');
-    botManager.shutdownAllBots(); // Implement this in botManager
-    wss.close(() => {
+    botManager.shutdownAllBots();
+    io.close(() => { // Close Socket.IO server
+        console.log('Socket.IO server closed.');
         server.close(() => {
-            console.log('Server shut down.');
+            console.log('HTTP server shut down.');
             process.exit(0);
         });
     });

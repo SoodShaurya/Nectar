@@ -1,129 +1,145 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { io, Socket } from 'socket.io-client';
 
-interface WebSocketHookOptions {
-    reconnectInterval?: number; // Milliseconds between reconnect attempts
-    maxReconnectAttempts?: number; // Maximum number of reconnect attempts (-1 for infinite)
+// Define Bot type (consistent with components)
+export interface Bot {
+    id: string;
+    status: string;
+    activity?: string; // Changed from string | null to optional string
+    options: any;
 }
 
-interface WebSocketMessage {
-    type: string;
-    payload?: any;
+// Define the hook's return structure
+interface SocketHook {
+    bots: Bot[];
+    activities: string[];
+    isConnected: boolean;
+    sendMessage: (eventName: string, payload: any) => void;
+    error: string | null;
+    connect: () => void;
+    disconnect: () => void;
 }
 
-const DEFAULT_RECONNECT_INTERVAL = 5000; // 5 seconds
-const DEFAULT_MAX_RECONNECT_ATTEMPTS = -1; // Infinite
+// Hook implementation using Socket.IO
+export function useWebSocket(url: string | null): SocketHook {
+    const [bots, setBots] = useState<Bot[]>([]);
+    const [activities, setActivities] = useState<string[]>([]);
+    const [isConnected, setIsConnected] = useState<boolean>(false);
+    const [error, setError] = useState<string | null>(null);
+    const socketRef = useRef<Socket | null>(null);
 
-export function useWebSocket(url: string | null, options: WebSocketHookOptions = {}) {
-    const {
-        reconnectInterval = DEFAULT_RECONNECT_INTERVAL,
-        maxReconnectAttempts = DEFAULT_MAX_RECONNECT_ATTEMPTS,
-    } = options;
-
-    const [isConnected, setIsConnected] = useState(false);
-    const [lastMessage, setLastMessage] = useState<MessageEvent | null>(null);
-    const [error, setError] = useState<Event | null>(null);
-    const socketRef = useRef<WebSocket | null>(null);
-    const reconnectAttemptsRef = useRef(0);
-    const reconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const disconnect = useCallback(() => {
+        if (socketRef.current) {
+            console.log('Disconnecting Socket.IO socket...');
+            socketRef.current.disconnect();
+            socketRef.current = null; // Clear the ref after disconnect
+            setIsConnected(false);
+            setBots([]); // Clear state on disconnect
+            setActivities([]);
+            setError(null);
+        }
+    }, []);
 
     const connect = useCallback(() => {
-        if (!url || (socketRef.current && socketRef.current.readyState === WebSocket.OPEN)) {
-            console.log('WebSocket already connected or URL is null.');
+        if (!url || (socketRef.current && socketRef.current.connected)) {
+            console.log('Socket.IO already connected or URL is null.');
             return;
         }
 
-        // Clear any existing reconnect timer
-        if (reconnectTimerRef.current) {
-            clearTimeout(reconnectTimerRef.current);
-            reconnectTimerRef.current = null;
+        // Disconnect previous socket if exists
+        if (socketRef.current) {
+            disconnect();
         }
 
-        console.log(`Attempting WebSocket connection to ${url}...`);
-        socketRef.current = new WebSocket(url);
+        console.log(`Attempting Socket.IO connection to ${url}...`);
+        // Connect to the default namespace
+        const socket = io(url, {
+            reconnection: true,
+            reconnectionAttempts: 5, // Or use options passed to the hook
+            reconnectionDelay: 3000,
+            path: '/socket.io', // Ensure this matches server if needed
+        });
+        socketRef.current = socket;
+        setError(null);
 
-        socketRef.current.onopen = () => {
-            console.log('WebSocket connection established.');
+        socket.on('connect', () => {
+            console.log('Socket.IO Connected:', socket.id);
             setIsConnected(true);
             setError(null);
-            reconnectAttemptsRef.current = 0; // Reset reconnect attempts on successful connection
-        };
+            // Request initial state after connection
+            socket.emit('getBotList');
+            socket.emit('getActivities');
+        });
 
-        socketRef.current.onmessage = (event) => {
-            // console.log('WebSocket message received:', event.data);
-            setLastMessage(event);
-        };
-
-        socketRef.current.onerror = (event) => {
-            console.error('WebSocket error:', event);
-            setError(event);
-            // Note: onclose will usually be called after onerror
-        };
-
-        socketRef.current.onclose = (event) => {
-            console.log('WebSocket connection closed:', event.code, event.reason || 'No reason specified');
+        socket.on('disconnect', (reason) => {
+            console.log('Socket.IO Disconnected:', reason);
             setIsConnected(false);
-            setLastMessage(null); // Clear last message on disconnect
-            socketRef.current = null; // Ensure ref is nullified
-
-            // Attempt to reconnect if conditions are met
-            if (maxReconnectAttempts === -1 || reconnectAttemptsRef.current < maxReconnectAttempts) {
-                reconnectAttemptsRef.current++;
-                console.log(`Attempting to reconnect (${reconnectAttemptsRef.current}/${maxReconnectAttempts === -1 ? '∞' : maxReconnectAttempts})...`);
-                reconnectTimerRef.current = setTimeout(connect, reconnectInterval);
-            } else {
-                console.log('Maximum reconnect attempts reached.');
-                setError(new Event('Maximum reconnect attempts reached.')); // Set an error state
+            // Handle potential cleanup or state reset if needed
+            if (reason === 'io server disconnect') {
+                // The server forced the disconnect, maybe try to reconnect manually
+                // socket.connect(); // Be careful with automatic reconnect loops
             }
-        };
-    }, [url, reconnectInterval, maxReconnectAttempts]);
+            // else the client will automatically try to reconnect based on options
+        });
 
-    const disconnect = useCallback(() => {
-        if (reconnectTimerRef.current) {
-            clearTimeout(reconnectTimerRef.current);
-            reconnectTimerRef.current = null;
-        }
-        if (socketRef.current) {
-            console.log('Closing WebSocket connection manually.');
-            socketRef.current.close();
-            socketRef.current = null;
-            setIsConnected(false);
-            setLastMessage(null);
-            reconnectAttemptsRef.current = 0; // Reset attempts on manual disconnect
-        }
-    }, []);
+        socket.on('connect_error', (err) => {
+            console.error('Socket.IO Connection Error:', err.message);
+            setError(`Connection Error: ${err.message}`);
+            setIsConnected(false); // Ensure disconnected state
+            // socketRef.current = null; // Socket.IO handles the ref internally on error? Check docs.
+        });
+
+        // --- Listen for specific events from the server ---
+        socket.on('botListUpdate', (payload: Bot[]) => {
+            console.log('Received botListUpdate:', payload);
+            setBots(payload || []);
+        });
+
+        socket.on('availableActivities', (payload: string[]) => {
+            console.log('Received availableActivities:', payload);
+            setActivities(payload || []);
+        });
+
+        socket.on('error', (errorMessage: string) => { // Listen for custom 'error' events
+             console.error('Server error message:', errorMessage);
+             setError(`Server Error: ${errorMessage}`);
+        });
+
+        // Add listeners for any other events from the default namespace here
+
+    }, [url, disconnect]);
 
     useEffect(() => {
         if (url) {
             connect();
         } else {
-            // If URL becomes null, disconnect cleanly
             disconnect();
         }
 
-        // Cleanup function: close connection when component unmounts or URL changes
+        // Cleanup function
         return () => {
             disconnect();
         };
-    }, [url, connect, disconnect]); // Re-run effect if URL or connect/disconnect functions change
+    }, [url, connect, disconnect]);
 
-    const sendMessage = useCallback((type: string, payload: any = {}) => {
-        if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
-            const message: WebSocketMessage = { type, payload };
-            const messageString = JSON.stringify(message);
-            console.log('Sending message:', messageString);
-            socketRef.current.send(messageString);
+    // Function to send messages (emit events) to the server
+    const sendMessage = useCallback((eventName: string, payload: any = {}) => {
+        if (socketRef.current && socketRef.current.connected) {
+            console.log(`Emitting event "${eventName}":`, payload);
+            socketRef.current.emit(eventName, payload);
         } else {
-            console.error('WebSocket is not connected. Cannot send message.');
-            // Optionally, queue the message or throw an error
+            console.error('Socket.IO is not connected. Cannot send message.');
+            setError('Not connected to server. Cannot perform action.');
         }
     }, []); // Depends only on the socketRef state
 
     return {
+        bots,
+        activities,
         isConnected,
-        lastMessage,
         error,
         sendMessage,
-        connect, // Expose connect/disconnect if manual control is needed
+        connect,
         disconnect,
     };
 }

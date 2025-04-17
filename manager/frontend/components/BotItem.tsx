@@ -14,6 +14,7 @@ interface BotItemProps {
     availableActivities: string[];
     onChangeActivity: (botId: string, activityName: string) => void;
     onDeleteBot: (botId: string) => void;
+    onViewBot: (botId: string) => void; // Add the view handler prop
     isDisabled: boolean; // Controls whether inputs/buttons are disabled
 }
 
@@ -22,6 +23,7 @@ const BotItem: React.FC<BotItemProps> = ({
     availableActivities,
     onChangeActivity,
     onDeleteBot,
+    onViewBot, // Destructure the view handler
     isDisabled,
 }) => {
     // State to manage the selected activity in the dropdown for this specific bot item
@@ -39,6 +41,10 @@ const BotItem: React.FC<BotItemProps> = ({
     const handleDeleteClick = useCallback(() => {
         onDeleteBot(bot.id);
     }, [bot.id, onDeleteBot]);
+
+    const handleViewClick = useCallback(() => {
+        onViewBot(bot.id);
+    }, [bot.id, onViewBot]);
 
     return (
         <div
@@ -91,6 +97,14 @@ const BotItem: React.FC<BotItemProps> = ({
                     style={{ padding: '5px 10px', backgroundColor: '#f44336', color: 'white', border: 'none', borderRadius: '3px', cursor: 'pointer' }}
                 >
                     Delete
+                </button>
+                {/* Add View Button */}
+                <button
+                    onClick={handleViewClick}
+                    disabled={isDisabled} // Disable if bot is not idle
+                    style={{ padding: '5px 10px', backgroundColor: '#2196F3', color: 'white', border: 'none', borderRadius: '3px', cursor: 'pointer' }}
+                >
+                    View
                 </button>
             </div>
         </div>

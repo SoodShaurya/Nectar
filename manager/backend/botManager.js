@@ -1,8 +1,12 @@
 const mineflayer = require('mineflayer');
 const fs = require('fs');
 const path = require('path');
+const io = require('socket.io-client'); // Added for viewer connection
 
-let activeBots = {}; // Store bot instances and data: { botId: { bot: instance, status: '...', activity: '...', options: {...} } }
+// Define default view distance, can be made configurable later
+const VIEW_DISTANCE = 6;
+
+let activeBots = {}; // Store bot instances and data: { botId: { bot: instance, status: '...', activity: '...', options: {...}, viewerSocket: socketInstance, primitives: {} } }
 let broadcast; // Function to send messages to all clients
 
 const activitiesDir = path.join(__dirname, 'activities');
@@ -32,7 +36,16 @@ function createBot(options) {
     }
 
     console.log(`Creating bot ${botId} with options:`, options);
-    activeBots[botId] = { bot: null, status: 'connecting', activity: null, options: options, activityInterval: null }; // Store initial state
+    // Store initial state, including viewerSocket and primitives store
+    activeBots[botId] = {
+        bot: null,
+        status: 'connecting',
+        activity: null,
+        options: options,
+        activityInterval: null,
+        viewerSocket: null, // Initialize viewer socket
+        primitives: {} // Store drawn primitives for this bot
+    };
     broadcastBotList(); // Notify frontend about the new bot entry
 
     try {
@@ -50,10 +63,59 @@ function createBot(options) {
 
         activeBots[botId].bot = bot;
 
+        // --- Viewer Integration ---
+        const viewerSocket = io('ws://localhost:6900/viewer', { // Connect to the viewer namespace
+            reconnection: true,
+            reconnectionAttempts: 5,
+            reconnectionDelay: 1000,
+        });
+        activeBots[botId].viewerSocket = viewerSocket;
+
+        viewerSocket.on('connect', () => {
+            console.log(`Bot ${botId} connected to viewer namespace with socket ID ${viewerSocket.id}`);
+            viewerSocket.emit('identifyAsBot', { botId });
+
+            // Send initial primitives if any were added before connection (unlikely but possible)
+             for (const id in activeBots[botId]?.primitives) {
+                 viewerSocket.emit('viewerData', { botId, payload: { type: 'primitive', data: activeBots[botId].primitives[id] } });
+             }
+        });
+
+        viewerSocket.on('disconnect', (reason) => {
+            console.log(`Bot ${botId} disconnected from viewer namespace. Reason: ${reason}`);
+        });
+
+        viewerSocket.on('connect_error', (err) => {
+            console.error(`Bot ${botId} viewer connection error: ${err.message}`);
+        });
+
         // --- Bot Event Listeners ---
+
+        // Basic position updates for the viewer
+        const sendViewerPosition = () => {
+            if (bot && bot.entity && bot.entity.position && viewerSocket.connected && activeBots[botId]) {
+                 const payload = {
+                     type: 'position',
+                     data: {
+                         pos: bot.entity.position,
+                         yaw: bot.entity.yaw,
+                         pitch: bot.entity.pitch, // Send pitch for potential first-person view later
+                         addMesh: true // Tell frontend to draw the bot mesh
+                     }
+                 };
+                 viewerSocket.emit('viewerData', { botId, payload });
+            }
+        };
+        // TODO: Add listeners for chunk loading, entities, etc. for a full world view
+        // This requires adapting WorldView logic or similar, which is complex.
+        // For now, only sending position.
+
+        bot.on('move', sendViewerPosition); // Send position frequently on move
+
         bot.once('spawn', () => {
             console.log(`Bot ${botId} spawned.`);
             activeBots[botId].status = 'idle';
+            sendViewerPosition(); // Send initial position to viewer
             // Load default activity after spawn
             changeActivity(botId, 'stand_still'); // Default activity
             broadcastBotList();
@@ -63,14 +125,16 @@ function createBot(options) {
             console.error(`Bot ${botId} error:`, err);
             if (activeBots[botId]) {
                  activeBots[botId].status = `error: ${err.message}`;
-                 // Maybe try to unload activity? Risky if bot state is bad.
                  if (activeBots[botId].activityInterval) {
                     clearInterval(activeBots[botId].activityInterval);
                     activeBots[botId].activityInterval = null;
                  }
-                 activeBots[botId].activity = 'error'; // Indicate activity stopped due to error
+                 activeBots[botId].activity = 'error';
+                 // Disconnect viewer socket on error
+                 if (activeBots[botId].viewerSocket) {
+                     activeBots[botId].viewerSocket.disconnect();
+                 }
             }
-            // Don't delete immediately, let user decide via frontend
             broadcastBotList();
         });
 
@@ -83,27 +147,70 @@ function createBot(options) {
                     activeBots[botId].activityInterval = null;
                  }
                 activeBots[botId].activity = 'kicked';
-                delete activeBots[botId].bot; // Remove bot instance
+                 // Disconnect viewer socket on kick
+                 if (activeBots[botId].viewerSocket) {
+                     activeBots[botId].viewerSocket.disconnect();
+                 }
+                delete activeBots[botId].bot;
              }
-            // Don't delete immediately, let user decide via frontend
             broadcastBotList();
         });
 
         bot.once('end', (reason) => {
             console.log(`Bot ${botId} disconnected. Reason: ${reason}`);
-            if (activeBots[botId]) { // Check if it wasn't deleted manually first
+            // Remove the 'move' listener specific to this bot instance
+            bot.removeListener('move', sendViewerPosition);
+            if (activeBots[botId]) {
                 activeBots[botId].status = `disconnected: ${reason}`;
                  if (activeBots[botId].activityInterval) {
                     clearInterval(activeBots[botId].activityInterval);
                     activeBots[botId].activityInterval = null;
                  }
                 activeBots[botId].activity = 'disconnected';
-                delete activeBots[botId].bot; // Remove bot instance
-                // Consider automatic removal after a delay or keep for manual cleanup
-                // For now, keep the entry but mark as disconnected
+                 // Disconnect viewer socket on end
+                 if (activeBots[botId].viewerSocket) {
+                     activeBots[botId].viewerSocket.disconnect();
+                 }
+                delete activeBots[botId].bot;
             }
             broadcastBotList();
         });
+
+        // --- Add bot.viewer methods ---
+        bot.viewer = {
+            erase: (id) => {
+                if (!activeBots[botId]) return;
+                delete activeBots[botId].primitives[id];
+                if (viewerSocket.connected) {
+                    viewerSocket.emit('viewerData', { botId, payload: { type: 'primitive', data: { id } } }); // Send erase command
+                }
+            },
+            drawBoxGrid: (id, start, end, color = 'aqua') => {
+                 if (!activeBots[botId]) return;
+                 const primitiveData = { type: 'boxgrid', id, start, end, color };
+                 activeBots[botId].primitives[id] = primitiveData;
+                 if (viewerSocket.connected) {
+                    viewerSocket.emit('viewerData', { botId, payload: { type: 'primitive', data: primitiveData } });
+                 }
+            },
+            drawLine: (id, points, color = 0xff0000) => {
+                 if (!activeBots[botId]) return;
+                 const primitiveData = { type: 'line', id, points, color };
+                 activeBots[botId].primitives[id] = primitiveData;
+                 if (viewerSocket.connected) {
+                    viewerSocket.emit('viewerData', { botId, payload: { type: 'primitive', data: primitiveData } });
+                 }
+            },
+            drawPoints: (id, points, color = 0xff0000, size = 5) => {
+                 if (!activeBots[botId]) return;
+                 const primitiveData = { type: 'points', id, points, color, size };
+                 activeBots[botId].primitives[id] = primitiveData;
+                 if (viewerSocket.connected) {
+                    viewerSocket.emit('viewerData', { botId, payload: { type: 'primitive', data: primitiveData } });
+                 }
+            }
+            // TODO: Add methods for other shapes if needed (spheres, paths etc.)
+        };
 
     } catch (error) {
         console.error(`Failed to create bot ${botId}:`, error);
@@ -119,11 +226,18 @@ function deleteBot(botId) {
     console.log(`Attempting to delete bot ${botId}`);
     const botData = activeBots[botId];
     if (botData) {
+        // Disconnect viewer socket first
+        if (botData.viewerSocket) {
+            console.log(`Disconnecting viewer socket for bot ${botId}`);
+            botData.viewerSocket.disconnect();
+        }
+        // Quit the bot if it exists
         if (botData.bot) {
             unloadActivity(botData.bot, botData.activity); // Attempt to clean up activity
             botData.bot.quit();
         }
-        delete activeBots[botId]; // Remove from our management
+        // Remove from our management
+        delete activeBots[botId];
         console.log(`Bot ${botId} removed.`);
         broadcastBotList();
     } else {
