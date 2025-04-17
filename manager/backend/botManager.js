@@ -1,8 +1,10 @@
 const mineflayer = require('mineflayer');
+const { Vec3 } = require('vec3'); // Import Vec3
 const fs = require('fs');
 const path = require('path');
 const io = require('socket.io-client'); // Added for viewer connection
 const botMemoryPlugin = require('../../engine/lib/plugins/botMemory'); // Load the memory plugin
+const { createPlugin: pathfinderPluginLoader } = require('../../pathfinder/dist/index.js'); // Use correct path to compiled JS entry point
 
 // Define default view distance, can be made configurable later
 const VIEW_DISTANCE = 6;
@@ -111,10 +113,11 @@ function createBot(options) {
             version: version, // Optional, let mineflayer handle default if undefined
             auth: 'offline', // As requested
             checkTimeoutInterval: 60 * 1000, // Increase timeout interval
-            plugins: {
-                memory: botMemoryPlugin, // Load the memory plugin
+            plugins: [ // Use array format for plugins when using loader functions
+                botMemoryPlugin, // Load the memory plugin
+                pathfinderPluginLoader() // Load the pathfinder plugin using its exported loader
                 // Add any other essential plugins if needed later
-            }
+            ]
         });
 
         activeBots[botId].bot = bot;
@@ -477,6 +480,37 @@ function broadcastBotList() {
     }
 }
 
+// --- New function to set target coordinates ---
+function setBotTargetCoordinates(botId, coords) {
+    const botData = activeBots[botId];
+    if (botData && botData.bot && botData.bot.memory) {
+        try {
+            // Ensure coords are numbers before creating Vec3
+            const x = parseFloat(coords.x);
+            const y = parseFloat(coords.y);
+            const z = parseFloat(coords.z);
+            if (isNaN(x) || isNaN(y) || isNaN(z)) {
+                console.error(`Error setting target coordinates for ${botId}: Invalid coordinate values received`, coords);
+                return;
+            }
+            const targetVec = new Vec3(x, y, z);
+            botData.bot.memory.setTargetCoordinates(targetVec);
+            console.log(`[BotManager] Set target coordinates for ${botId} to: ${targetVec}`);
+            // Add log to check the value immediately after setting
+            const checkCoords = botData.bot.memory.getTargetCoordinates();
+            console.log(`[BotManager] Value in memory for ${botId} after set:`, checkCoords, `(Is Vec3: ${checkCoords instanceof Vec3})`);
+            // Optionally, trigger an activity update if the bot is currently pathfinding
+            // if (botData.activity === 'pathfind') {
+            //     // Re-trigger or update the pathfind activity logic if needed
+            // }
+        } catch (error) {
+            console.error(`Error setting target coordinates for ${botId}:`, error);
+        }
+    } else {
+        console.warn(`Bot ${botId} not found or memory plugin not available.`);
+    }
+}
+
 // --- Exports ---
 module.exports = {
     init,
@@ -485,5 +519,6 @@ module.exports = {
     changeActivity,
     getAvailableActivities,
     getBotList,
-    shutdownAllBots
+    shutdownAllBots,
+    setBotTargetCoordinates // Export the new function
 };

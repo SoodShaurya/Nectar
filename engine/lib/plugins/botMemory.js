@@ -9,6 +9,7 @@ class BotMemory {
     this.nearbyEntities = {}; // { id: { entity: entityRef, type: 'player'|'mob'|'object'|'other', position: Vec3, distance: number } }
     this.botDistances = {}; // { botId: distance }
     this.currentActivity = null; // String name of the current activity
+    this.targetCoordinates = null; // Vec3 | null - Target for pathfinding or other activities
     this.updateIntervalId = null;
     this.nearbyRadius = DEFAULT_NEARBY_RADIUS;
   }
@@ -123,6 +124,25 @@ class BotMemory {
     this.nearbyRadius = Math.max(0, radius); // Ensure radius is not negative
     console.log(`[BotMemory ${this.bot.username}] Nearby radius set to: ${this.nearbyRadius}`);
     this._updateNearbyEntities(); // Update immediately with the new radius
+  }
+
+  /**
+   * Sets the target coordinates in the bot's memory.
+   * @param {Vec3 | null} coords - The target coordinates (Vec3) or null to clear.
+   */
+  setTargetCoordinates(coords) {
+    // Removed instanceof Vec3 check as botManager ensures type before calling.
+    // We expect coords to be either a Vec3 object or null.
+    this.targetCoordinates = coords ? coords.clone() : null; // Clone to prevent external mutation
+    // console.log(`[BotMemory ${this.bot.username}] Target coordinates set to:`, this.targetCoordinates); // Optional: for debugging
+  }
+
+  /**
+   * Gets the target coordinates from the bot's memory.
+   * @returns {Vec3 | null} The target coordinates (Vec3) or null if not set.
+   */
+  getTargetCoordinates() {
+    return this.targetCoordinates;
   }
 }
 

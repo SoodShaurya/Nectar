@@ -85,6 +85,11 @@ export default function Home() {
         }
     }, [sendMessage]);
 
+    const handleSetTargetCoordinates = useCallback((botId: string, coords: { x: number; y: number; z: number }) => {
+        console.log(`Setting target for ${botId}:`, coords);
+        sendMessage('set_target_coords', { botId, coords });
+    }, [sendMessage]);
+
     // Functions for viewer modal
     const handleViewBot = useCallback((botId: string) => {
         console.log("Opening viewer for:", botId);
@@ -162,8 +167,9 @@ export default function Home() {
                             availableActivities={availableActivities}
                             onChangeActivity={handleChangeActivity}
                             onDeleteBot={handleDeleteBot}
-                            onViewBot={handleViewBot} // Pass the view handler
-                            isConnected={isConnected} // Add back the isConnected prop
+                            onViewBot={handleViewBot}
+                            onSetTargetCoordinates={handleSetTargetCoordinates} // Pass the new handler
+                            isConnected={isConnected}
                         />
                     ) : (
                         !error && <p>Attempting to connect to the manager server...</p>

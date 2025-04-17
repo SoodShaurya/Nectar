@@ -14,9 +14,11 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "minecraft-data": "^3.85.0",
     "mineflayer": "file:../../engine",
     "socket.io": "^4.8.1",
     "socket.io-client": "^4.8.1",
+    "vec3": "^0.1.10",
     "ws": "^8.17.0"
   }
 }

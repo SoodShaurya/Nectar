@@ -15,7 +15,8 @@ interface BotListProps {
     availableActivities: string[];
     onChangeActivity: (botId: string, activityName: string) => void;
     onDeleteBot: (botId: string) => void;
-    onViewBot: (botId: string) => void; // Add the new prop for viewing
+    onViewBot: (botId: string) => void;
+    onSetTargetCoordinates: (botId: string, coords: { x: number; y: number; z: number }) => void; // Add prop for setting target
     isConnected: boolean; // To determine overall state
 }
 
@@ -24,7 +25,8 @@ const BotList: React.FC<BotListProps> = ({
     availableActivities,
     onChangeActivity,
     onDeleteBot,
-    onViewBot, // Destructure the new prop
+    onViewBot,
+    onSetTargetCoordinates, // Destructure the new prop
     isConnected,
 }) => {
     // Don't render the list component itself if not connected
@@ -45,7 +47,8 @@ const BotList: React.FC<BotListProps> = ({
                     availableActivities={availableActivities}
                     onChangeActivity={onChangeActivity}
                     onDeleteBot={onDeleteBot}
-                    onViewBot={onViewBot} // Pass the handler down
+                    onViewBot={onViewBot}
+                    onSetTargetCoordinates={onSetTargetCoordinates} // Pass the handler down
                     // Disable controls if bot is not idle or disconnected
                     isDisabled={bot.status !== 'idle'} // isConnected check is already done above
                 />

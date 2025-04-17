@@ -25,8 +25,19 @@ export function createPlugin (opts?: {
     if (!bot.hasPlugin(utilPlugin)) bot.loadPlugin(utilPlugin)
     if (!bot.hasPlugin(physicsUtil)) bot.loadPlugin(physicsUtil)
     initSetup(bot.registry)
-    bot.pathfinder = new ThePathfinder(bot, opts)
-    bot.pathingUtil = new PathingUtil(bot)
+
+    // Wait for spawn before initializing pathfinder components that need bot.world
+    bot.once('spawn', () => {
+      // Check if already initialized (e.g., if spawn emits multiple times)
+      if (bot.pathfinder) return;
+      console.log(`Initializing pathfinder for ${bot.username} after spawn...`);
+      try {
+        bot.pathfinder = new ThePathfinder(bot, opts);
+        bot.pathingUtil = new PathingUtil(bot);
+      } catch (err) {
+        console.error(`Error initializing pathfinder components for ${bot.username}:`, err);
+      }
+    });
   }
 }
 

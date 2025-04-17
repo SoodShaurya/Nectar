@@ -99,12 +99,27 @@ io.on('connection', (socket) => {
             botManager.changeActivity(payload.botId, payload.activityName); // botManager will handle broadcasting updates
          } else {
              console.error('Invalid changeActivity payload:', payload);
-             socket.emit('error', 'Invalid changeActivity payload');
-         }
+              socket.emit('error', 'Invalid changeActivity payload');
+          }
+     });
+
+    socket.on('set_target_coords', (payload) => {
+        console.log('Received set_target_coords:', payload);
+        if (payload && payload.botId && payload.coords &&
+            typeof payload.coords.x === 'number' &&
+            typeof payload.coords.y === 'number' &&
+            typeof payload.coords.z === 'number')
+        {
+            // We'll add this function to botManager next
+            botManager.setBotTargetCoordinates(payload.botId, payload.coords);
+        } else {
+            console.error('Invalid set_target_coords payload:', payload);
+            socket.emit('error', 'Invalid set_target_coords payload');
+        }
     });
 
-    socket.on('getBotList', () => { // Explicit request
-         console.log('Received getBotList request');
+     socket.on('getBotList', () => { // Explicit request
+          console.log('Received getBotList request');
          socket.emit('botListUpdate', botManager.getBotList());
     });
 
