@@ -2,12 +2,15 @@ const mineflayer = require('mineflayer');
 const fs = require('fs');
 const path = require('path');
 const io = require('socket.io-client'); // Added for viewer connection
+const botMemoryPlugin = require('../../engine/lib/plugins/botMemory'); // Load the memory plugin
 
 // Define default view distance, can be made configurable later
 const VIEW_DISTANCE = 6;
+const BOT_DISTANCE_UPDATE_INTERVAL = 5000; // ms - How often to update distances between bots
 
 let activeBots = {}; // Store bot instances and data: { botId: { bot: instance, status: '...', activity: '...', options: {...}, viewerSocket: socketInstance, primitives: {} } }
 let broadcast; // Function to send messages to all clients
+let botDistanceUpdateInterval = null; // Interval ID for distance updates
 
 const activitiesDir = path.join(__dirname, 'activities');
 
@@ -17,7 +20,59 @@ function init(broadcastFunction) {
     console.log('Bot Manager Initialized.');
     // Load available activities on startup
     getAvailableActivities();
+    // Start periodic bot distance updates
+    startBotDistanceUpdates();
 }
+
+// --- Bot Distance Calculation ---
+function updateBotDistances() {
+    const botEntries = Object.entries(activeBots);
+    const distances = {}; // { targetBotId: { sourceBotId: distance } }
+
+    // Calculate distances between all valid bot pairs
+    for (let i = 0; i < botEntries.length; i++) {
+        const [botIdA, dataA] = botEntries[i];
+        if (!dataA.bot || !dataA.bot.entity || !dataA.bot.entity.position) continue;
+
+        distances[botIdA] = {}; // Initialize distance map for bot A
+
+        for (let j = i + 1; j < botEntries.length; j++) {
+            const [botIdB, dataB] = botEntries[j];
+            if (!dataB.bot || !dataB.bot.entity || !dataB.bot.entity.position) continue;
+
+            const dist = dataA.bot.entity.position.distanceTo(dataB.bot.entity.position);
+            distances[botIdA][botIdB] = dist;
+
+            // Ensure symmetry
+            if (!distances[botIdB]) distances[botIdB] = {};
+            distances[botIdB][botIdA] = dist;
+        }
+    }
+
+    // Push updates to each bot's memory
+    for (const [botId, data] of botEntries) {
+        if (data.bot && data.bot.memory && distances[botId]) {
+            data.bot.memory._updateBotDistances(distances[botId]);
+        }
+    }
+}
+
+function startBotDistanceUpdates() {
+    if (botDistanceUpdateInterval) {
+        clearInterval(botDistanceUpdateInterval);
+    }
+    console.log(`Starting bot distance updates every ${BOT_DISTANCE_UPDATE_INTERVAL}ms`);
+    botDistanceUpdateInterval = setInterval(updateBotDistances, BOT_DISTANCE_UPDATE_INTERVAL);
+}
+
+function stopBotDistanceUpdates() {
+    if (botDistanceUpdateInterval) {
+        console.log('Stopping bot distance updates.');
+        clearInterval(botDistanceUpdateInterval);
+        botDistanceUpdateInterval = null;
+    }
+}
+
 
 // --- Bot Management ---
 function createBot(options) {
@@ -57,7 +112,8 @@ function createBot(options) {
             auth: 'offline', // As requested
             checkTimeoutInterval: 60 * 1000, // Increase timeout interval
             plugins: {
-                // Add any essential plugins if needed later
+                memory: botMemoryPlugin, // Load the memory plugin
+                // Add any other essential plugins if needed later
             }
         });
 
@@ -114,8 +170,17 @@ function createBot(options) {
 
         bot.once('spawn', () => {
             console.log(`Bot ${botId} spawned.`);
+            if (!activeBots[botId]) return; // Guard against race conditions if bot deleted quickly
+
             activeBots[botId].status = 'idle';
             sendViewerPosition(); // Send initial position to viewer
+
+            // Start memory updates and set initial activity in memory
+            if (bot.memory) {
+                bot.memory.startUpdating();
+                bot.memory._setActivity('idle'); // Initial state before specific activity loads
+            }
+
             // Load default activity after spawn
             changeActivity(botId, 'stand_still'); // Default activity
             broadcastBotList();
@@ -130,12 +195,20 @@ function createBot(options) {
                     activeBots[botId].activityInterval = null;
                  }
                  activeBots[botId].activity = 'error';
+
+                 // Update memory and stop updates
+                 if (bot.memory) {
+                     bot.memory._setActivity('error');
+                     bot.memory.stopUpdating();
+                 }
+
                  // Disconnect viewer socket on error
                  if (activeBots[botId].viewerSocket) {
                      activeBots[botId].viewerSocket.disconnect();
                  }
             }
             broadcastBotList();
+            // Note: We don't delete activeBots[botId].bot here, allows potential reconnect logic later if desired
         });
 
         bot.on('kicked', (reason) => {
@@ -147,11 +220,18 @@ function createBot(options) {
                     activeBots[botId].activityInterval = null;
                  }
                 activeBots[botId].activity = 'kicked';
+
+                // Update memory and stop updates
+                if (bot.memory) {
+                    bot.memory._setActivity('kicked');
+                    bot.memory.stopUpdating();
+                }
+
                  // Disconnect viewer socket on kick
                  if (activeBots[botId].viewerSocket) {
                      activeBots[botId].viewerSocket.disconnect();
                  }
-                delete activeBots[botId].bot;
+                delete activeBots[botId].bot; // Remove bot instance on kick
              }
             broadcastBotList();
         });
@@ -167,11 +247,18 @@ function createBot(options) {
                     activeBots[botId].activityInterval = null;
                  }
                 activeBots[botId].activity = 'disconnected';
+
+                // Update memory and stop updates
+                if (bot.memory) {
+                    bot.memory._setActivity('disconnected');
+                    bot.memory.stopUpdating();
+                }
+
                  // Disconnect viewer socket on end
                  if (activeBots[botId].viewerSocket) {
                      activeBots[botId].viewerSocket.disconnect();
                  }
-                delete activeBots[botId].bot;
+                delete activeBots[botId].bot; // Remove bot instance on end
             }
             broadcastBotList();
         });
@@ -250,6 +337,7 @@ function shutdownAllBots() {
     Object.keys(activeBots).forEach(botId => {
         deleteBot(botId);
     });
+    stopBotDistanceUpdates(); // Stop distance updates on shutdown
     console.log('All bots shut down.');
 }
 
@@ -286,8 +374,16 @@ function loadActivity(bot, activityName) {
             if (intervalId && activeBots[botId]) {
                  activeBots[botId].activityInterval = intervalId; // Store interval if returned
             }
+            // Update memory with the new activity name
+            if (bot.memory) {
+                bot.memory._setActivity(activityName);
+            }
         } else {
             console.error(`Activity module ${activityName} does not have a valid load function.`);
+            // Set memory activity to error if load fails structurally
+            if (bot.memory) {
+                bot.memory._setActivity('error:invalid_module');
+            }
         }
     } catch (error) {
         console.error(`Failed to load activity "${activityName}" for bot ${botId}:`, error);
@@ -295,6 +391,10 @@ function loadActivity(bot, activityName) {
         if(activeBots[botId]) {
             activeBots[botId].status = `activity_error: ${activityName}`;
             activeBots[botId].activity = 'error';
+            // Update memory activity on load error
+            if (bot.memory) {
+                bot.memory._setActivity('error:load_failed');
+            }
         }
     }
 }
@@ -336,6 +436,10 @@ function unloadActivity(bot, activityName) {
         // Ensure activity is marked as null even if unload fails
         if (activeBots[botId] && activeBots[botId].activity === activityName) {
              activeBots[botId].activity = null;
+             // Also update memory
+             if (bot.memory) {
+                 bot.memory._setActivity(null); // Set to null when unloaded
+             }
         }
     }
 }
