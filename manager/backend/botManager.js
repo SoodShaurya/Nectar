@@ -1,10 +1,27 @@
-const mineflayer = require('mineflayer');
+// Determine which engine to load
+const useCustomEngine = process.env.USE_CUSTOM_ENGINE === 'true'; // Check for 'true' string
+let mineflayer;
+
+if (useCustomEngine) {
+    console.log('Using custom engine from ../../engine');
+    try {
+        mineflayer = require('../../engine'); // Assuming engine/index.js is the entry point
+    } catch (err) {
+        console.error("Error loading custom engine from '../../engine'. Falling back to installed mineflayer.", err);
+        mineflayer = require('mineflayer'); // Fallback
+    }
+} else {
+    console.log('Using installed mineflayer package');
+    mineflayer = require('mineflayer');
+}
+
 const { Vec3 } = require('vec3'); // Import Vec3
 const fs = require('fs');
 const path = require('path');
 const io = require('socket.io-client'); // Added for viewer connection
 const botMemoryPlugin = require('../../engine/lib/plugins/botMemory'); // Load the memory plugin
 const { createPlugin: pathfinderPluginLoader } = require('../../pathfinder/dist/index.js'); // Use correct path to compiled JS entry point
+const combatPluginLoader = require('../../combat/lib/index.js').default; // Corrected path to lib, Load the combat plugin (assuming default export)
 
 // Define default view distance, can be made configurable later
 const VIEW_DISTANCE = 6;
@@ -115,7 +132,8 @@ function createBot(options) {
             checkTimeoutInterval: 60 * 1000, // Increase timeout interval
             plugins: [ // Use array format for plugins when using loader functions
                 botMemoryPlugin, // Load the memory plugin
-                pathfinderPluginLoader() // Load the pathfinder plugin using its exported loader
+                pathfinderPluginLoader(), // Load the pathfinder plugin using its exported loader
+                combatPluginLoader // Load the combat plugin
                 // Add any other essential plugins if needed later
             ]
         });
@@ -346,10 +364,16 @@ function shutdownAllBots() {
 
 
 // --- Activity Management ---
-function changeActivity(botId, newActivityName) {
+// Modified to accept options for the new activity
+function changeActivity(botId, newActivityName, options = {}) {
     const botData = activeBots[botId];
-    if (!botData || !botData.bot || botData.status !== 'idle') {
-        console.warn(`Cannot change activity for bot ${botId}: Not ready or not found.`);
+    // Allow changing activity even if not idle, e.g., stopping combat
+    if (!botData || !botData.bot) {
+        console.warn(`Cannot change activity for bot ${botId}: Bot not found.`);
+        return;
+    }
+    if (botData.status === 'connecting' || botData.status.startsWith('error') || botData.status.startsWith('kicked') || botData.status.startsWith('disconnected')) {
+        console.warn(`Cannot change activity for bot ${botId}: Bot status is ${botData.status}.`);
         return;
     }
 
@@ -358,13 +382,14 @@ function changeActivity(botId, newActivityName) {
         unloadActivity(botData.bot, botData.activity);
     }
 
-    // Load new activity
-    loadActivity(botData.bot, newActivityName);
+    // Load new activity, passing options
+    loadActivity(botData.bot, newActivityName, options);
     botData.activity = newActivityName; // Update current activity name
     broadcastBotList(); // Update frontend with new activity
 }
 
-function loadActivity(bot, activityName) {
+// Modified to accept and pass options
+function loadActivity(bot, activityName, options = {}) {
     const botId = bot.username; // Assuming username is part of botId logic
     const activityPath = path.join(activitiesDir, `${activityName}.js`);
     try {
@@ -372,8 +397,9 @@ function loadActivity(bot, activityName) {
         delete require.cache[require.resolve(activityPath)];
         const activityModule = require(activityPath);
         if (activityModule.load && typeof activityModule.load === 'function') {
-            console.log(`Loading activity "${activityName}" for bot ${botId}`);
-            const intervalId = activityModule.load(bot); // Activity might return an interval ID
+            console.log(`Loading activity "${activityName}" for bot ${botId} with options:`, options);
+            // Pass options to the activity's load function
+            const intervalId = activityModule.load(bot, options); // Activity might return an interval ID
             if (intervalId && activeBots[botId]) {
                  activeBots[botId].activityInterval = intervalId; // Store interval if returned
             }
@@ -511,6 +537,52 @@ function setBotTargetCoordinates(botId, coords) {
     }
 }
 
+// --- New function to get nearby entities ---
+function getNearbyEntities(botId, range = 32) { // Default range of 32 blocks
+    const botData = activeBots[botId];
+    if (!botData || !botData.bot || !botData.bot.entities) {
+        console.warn(`Cannot get entities for bot ${botId}: Bot not found or entities not available.`);
+        return [];
+    }
+
+    const botPos = botData.bot.entity.position;
+    const nearby = [];
+
+    for (const entityId in botData.bot.entities) {
+        const entity = botData.bot.entities[entityId];
+        if (entity === botData.bot.entity) continue; // Skip self
+        if (entity.position.distanceTo(botPos) <= range) {
+            nearby.push({
+                id: entity.id, // Use entity.id if available, otherwise fallback might be needed
+                username: entity.username, // May be undefined for mobs
+                name: entity.name || entity.displayName, // Use name (mobs) or displayName (objects)
+                type: entity.type, // 'player', 'mob', 'object'
+                position: entity.position
+            });
+        }
+    }
+    // console.log(`Found ${nearby.length} entities near ${botId}`); // Debug log
+    return nearby;
+}
+
+// --- New function to set combat target ID ---
+function setBotCombatTarget(botId, targetId) {
+    const botData = activeBots[botId];
+    if (botData && botData.bot && botData.bot.memory) {
+        try {
+            // targetId can be string (username) or number (entity id)
+            botData.bot.memory.setCombatTargetId(targetId);
+            console.log(`[BotManager] Set combat target for ${botId} to ID: ${targetId}`);
+            // Optionally notify the frontend or log confirmation
+        } catch (error) {
+            console.error(`Error setting combat target for ${botId}:`, error);
+        }
+    } else {
+        console.warn(`Bot ${botId} not found or memory plugin not available for setting combat target.`);
+    }
+}
+
+
 // --- Exports ---
 module.exports = {
     init,
@@ -520,5 +592,7 @@ module.exports = {
     getAvailableActivities,
     getBotList,
     shutdownAllBots,
-    setBotTargetCoordinates // Export the new function
+    setBotTargetCoordinates,
+    getNearbyEntities,
+    setBotCombatTarget // Export the new function
 };

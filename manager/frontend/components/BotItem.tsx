@@ -1,8 +1,16 @@
 'use client';
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 
 // Define types matching page.tsx and BotList.tsx
+interface EntityInfo {
+    id: number | string; // Can be number (entity id) or string (username)
+    username?: string;
+    name?: string;
+    type?: string;
+    position?: { x: number; y: number; z: number };
+}
+
 interface Bot {
     id: string;
     status: string;
@@ -15,7 +23,13 @@ interface BotItemProps {
     onChangeActivity: (botId: string, activityName: string) => void;
     onDeleteBot: (botId: string) => void;
     onViewBot: (botId: string) => void;
-    onSetTargetCoordinates: (botId: string, coords: { x: number; y: number; z: number }) => void; // New prop for setting target
+    onSetTargetCoordinates: (botId: string, coords: { x: number; y: number; z: number }) => void;
+    // --- Refactored Combat Props ---
+    onGetNearbyEntities: (botId: string) => void;
+    onSetCombatTarget: (botId: string, targetId: string | number) => void; // New prop
+    // onStartCombat and onStopCombat removed
+    nearbyEntities: EntityInfo[] | null; // Entities specific to this bot, passed from parent
+    // --- End Refactored Combat Props ---
     isDisabled: boolean; // Controls whether inputs/buttons are disabled
 }
 
@@ -25,7 +39,13 @@ const BotItem: React.FC<BotItemProps> = ({
     onChangeActivity,
     onDeleteBot,
     onViewBot,
-    onSetTargetCoordinates, // Destructure the new prop
+    onSetTargetCoordinates,
+    // --- Destructure Refactored Combat Props ---
+    onGetNearbyEntities,
+    onSetCombatTarget, // Destructure new prop
+    // onStartCombat and onStopCombat removed
+    nearbyEntities,
+    // --- End Destructure ---
     isDisabled,
 }) => {
     // State for activity dropdown
@@ -34,11 +54,20 @@ const BotItem: React.FC<BotItemProps> = ({
     const [targetX, setTargetX] = useState('');
     const [targetY, setTargetY] = useState('');
     const [targetZ, setTargetZ] = useState('');
+    // --- New Combat State ---
+    const [selectedTargetId, setSelectedTargetId] = useState<string | number>(''); // Can be username or entity ID
+    // --- End New Combat State ---
+
 
     // Update local activity state if the bot's activity prop changes from the server
-    React.useEffect(() => {
+    useEffect(() => {
         setSelectedActivity(bot.activity || '');
     }, [bot.activity]);
+
+    // Clear selected target if the entity list changes (e.g., after refresh)
+    useEffect(() => {
+        setSelectedTargetId('');
+    }, [nearbyEntities]);
 
     const handleActivityChangeClick = useCallback(() => {
         onChangeActivity(bot.id, selectedActivity);
@@ -66,6 +95,25 @@ const BotItem: React.FC<BotItemProps> = ({
     const handleViewClick = useCallback(() => {
         onViewBot(bot.id);
     }, [bot.id, onViewBot]);
+
+    // --- New Combat Handlers ---
+    const handleFindTargetsClick = useCallback(() => {
+        onGetNearbyEntities(bot.id);
+    }, [bot.id, onGetNearbyEntities]);
+
+    // handleAttackClick and handleStopCombatClick removed
+
+    // --- New Handler for Setting Combat Target ---
+     const handleSetCombatTargetClick = useCallback(() => {
+        if (selectedTargetId) {
+            onSetCombatTarget(bot.id, selectedTargetId);
+            alert(`Combat target set to ${selectedTargetId} for ${bot.id}. Change activity to 'combat' to start.`); // User feedback
+        } else {
+            alert('Please select a target first.');
+        }
+    }, [bot.id, selectedTargetId, onSetCombatTarget]);
+    // --- End New Handler ---
+
 
     return (
         <div
@@ -113,16 +161,15 @@ const BotItem: React.FC<BotItemProps> = ({
                     >
                         Change Activity
                     </button>
+                    {/* Delete button moved here */}
                     <button
                         onClick={handleDeleteClick}
-                        // Optionally keep delete enabled even if bot is busy? User decision.
-                        // disabled={isDisabled}
                         style={{ padding: '5px 10px', backgroundColor: '#f44336', color: 'white', border: 'none', borderRadius: '3px', cursor: 'pointer' }}
                     >
                         Delete
                     </button>
-                    {/* Add View Button */}
-                    <button
+                    {/* View Button moved here */}
+                     <button
                         onClick={handleViewClick}
                         disabled={isDisabled} // Disable if bot is not idle
                         style={{ padding: '5px 10px', backgroundColor: '#2196F3', color: 'white', border: 'none', borderRadius: '3px', cursor: 'pointer' }}
@@ -133,7 +180,7 @@ const BotItem: React.FC<BotItemProps> = ({
 
                 {/* Target Coordinates Controls */}
                 <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
-                    <label>Target:</label>
+                    <label>Target Coords:</label>
                     <input
                         type="number"
                         placeholder="X"
@@ -166,6 +213,42 @@ const BotItem: React.FC<BotItemProps> = ({
                         Set Target
                     </button>
                 </div>
+
+                 {/* Combat Target Controls */}
+                 <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                    <label>Combat Target:</label>
+                    <button
+                        onClick={handleFindTargetsClick}
+                        disabled={isDisabled}
+                        style={{ padding: '5px 10px' }}
+                        title="Refresh nearby entity list"
+                    >
+                        Find Targets
+                    </button>
+                    <select
+                        value={selectedTargetId}
+                        onChange={(e) => setSelectedTargetId(e.target.value)}
+                        disabled={isDisabled || !nearbyEntities || nearbyEntities.length === 0}
+                        style={{ padding: '5px', minWidth: '150px' }}
+                    >
+                        <option value="" disabled>Select Target...</option>
+                        {nearbyEntities?.map((entity) => (
+                            <option key={entity.id} value={entity.username || entity.id}> {/* Use username if available, else ID */}
+                                {entity.username || entity.name || `ID: ${entity.id}`} ({entity.type})
+                            </option>
+                        ))}
+                    </select>
+                     {/* "Set Combat Target" button moved here */}
+                     <button
+                        onClick={handleSetCombatTargetClick} // Use the correct handler
+                        disabled={isDisabled || !selectedTargetId} // Disable only if no target selected or bot busy
+                        style={{ padding: '5px 10px', backgroundColor: '#ff9800', color: 'white', border: 'none', borderRadius: '3px', cursor: 'pointer' }}
+                    >
+                        Set Combat Target
+                    </button>
+                    {/* Attack and Stop Combat buttons removed */}
+                </div>
+
             </div>
         </div>
     );

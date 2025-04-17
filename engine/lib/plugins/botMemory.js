@@ -10,6 +10,7 @@ class BotMemory {
     this.botDistances = {}; // { botId: distance }
     this.currentActivity = null; // String name of the current activity
     this.targetCoordinates = null; // Vec3 | null - Target for pathfinding or other activities
+    this.combatTargetId = null; // String | number | null - Target ID for combat activity
     this.updateIntervalId = null;
     this.nearbyRadius = DEFAULT_NEARBY_RADIUS;
   }
@@ -143,6 +144,23 @@ class BotMemory {
    */
   getTargetCoordinates() {
     return this.targetCoordinates;
+  }
+
+  /**
+   * Sets the combat target ID in the bot's memory.
+   * @param {string | number | null} targetId - The entity ID or username of the target, or null to clear.
+   */
+  setCombatTargetId(targetId) {
+    this.combatTargetId = targetId;
+    // console.log(`[BotMemory ${this.bot.username}] Combat target ID set to:`, this.combatTargetId); // Optional: for debugging
+  }
+
+  /**
+   * Gets the combat target ID from the bot's memory.
+   * @returns {string | number | null} The target ID or null if not set.
+   */
+  getCombatTargetId() {
+    return this.combatTargetId;
   }
 }
 

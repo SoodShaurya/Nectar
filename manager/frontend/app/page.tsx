@@ -1,9 +1,7 @@
 'use client'; // Required for hooks like useState, useEffect
 
-'use client'; // Required for hooks like useState, useEffect
-
 import React, { useState, useEffect, useCallback } from 'react';
-import { useWebSocket, Bot } from '@/hooks/useWebSocket'; // Import the hook and Bot type
+import { useWebSocket, Bot, EntityInfo } from '@/hooks/useWebSocket'; // Import the hook, Bot type, and EntityInfo
 import BotList from '@/components/BotList';
 import BotViewer from '@/components/BotViewer'; // Import the new viewer component
 
@@ -15,8 +13,6 @@ export default function Home() {
     const [version, setVersion] = useState(''); // e.g., 1.20.1
 
     // State for application data (managed by the hook now)
-    // const [bots, setBots] = useState<Bot[]>([]); // Managed by useWebSocket
-    // const [availableActivities, setAvailableActivities] = useState<string[]>([]); // Managed by useWebSocket
     const [connectionMessage, setConnectionMessage] = useState('Determining WebSocket URL...');
     const [wsUrl, setWsUrl] = useState<string | null>(null);
     const [viewingBotId, setViewingBotId] = useState<string | null>(null); // State for viewer modal
@@ -24,7 +20,6 @@ export default function Home() {
     // Determine WebSocket URL on client-side mount (use current host, fixed port)
     useEffect(() => {
         // This code runs only in the browser
-        // Construct the URL for the backend Socket.IO server (port 6900)
         const backendProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const backendHost = window.location.hostname; // Assumes backend is on the same host
         const backendPort = 6900; // Explicitly use the backend port
@@ -35,17 +30,15 @@ export default function Home() {
     }, []);
 
     // Initialize WebSocket connection using the hook
-    // The hook now returns the state directly
-    const { bots, activities: availableActivities, isConnected, error, sendMessage } = useWebSocket(wsUrl);
+    // Get nearbyEntitiesMap from the hook
+    const { bots, activities: availableActivities, isConnected, error, sendMessage, nearbyEntitiesMap } = useWebSocket(wsUrl);
 
     // Update connection message based on hook state
     useEffect(() => {
         if (error) {
-            // Error is now just a string or null from the hook
             setConnectionMessage(`Error: ${error}`);
         } else if (isConnected) {
             setConnectionMessage('Connected.');
-            // Clear the message after a short delay
             const timer = setTimeout(() => setConnectionMessage(''), 3000);
             return () => clearTimeout(timer);
         } else if (wsUrl) {
@@ -54,9 +47,6 @@ export default function Home() {
             setConnectionMessage('Determining server address...'); // Initial state before wsUrl is set
         }
     }, [isConnected, error, wsUrl]);
-
-    // No longer need useEffect for lastMessage or handleServerMessage
-    // The hook manages state updates internally via socket event listeners.
 
     const handleCreateBot = useCallback(() => {
         if (!serverAddress || !serverPort || !username) {
@@ -69,7 +59,6 @@ export default function Home() {
             username: username,
             version: version || undefined, // Let backend handle default if empty
         };
-        // Emit 'createBot' event with options
         sendMessage('createBot', botOptions);
         setUsername(''); // Clear username for next bot
     }, [serverAddress, serverPort, username, version, sendMessage]);
@@ -87,10 +76,28 @@ export default function Home() {
 
     const handleSetTargetCoordinates = useCallback((botId: string, coords: { x: number; y: number; z: number }) => {
         console.log(`Setting target for ${botId}:`, coords);
-        sendMessage('set_target_coords', { botId, coords });
-    }, [sendMessage]);
+         sendMessage('set_target_coords', { botId, coords });
+     }, [sendMessage]);
 
-    // Functions for viewer modal
+     // --- Refactored Combat Handlers ---
+     const handleGetNearbyEntities = useCallback((botId: string) => {
+         console.log(`Requesting nearby entities for ${botId}`);
+         sendMessage('getNearbyEntities', { botId });
+     }, [sendMessage]);
+
+     // New handler to set the target in memory
+     const handleSetCombatTarget = useCallback((botId: string, targetId: string | number) => {
+         console.log(`Setting combat target for ${botId} to ${targetId}`);
+         sendMessage('setCombatTarget', { botId, targetId });
+         // Optionally provide user feedback here (e.g., toast notification)
+     }, [sendMessage]);
+
+     // handleStartCombat and handleStopCombat are removed as combat is now triggered
+     // by changing the activity via handleChangeActivity after setting the target.
+     // --- End Refactored Combat Handlers ---
+
+
+     // Functions for viewer modal
     const handleViewBot = useCallback((botId: string) => {
         console.log("Opening viewer for:", botId);
         setViewingBotId(botId);
@@ -168,9 +175,15 @@ export default function Home() {
                             onChangeActivity={handleChangeActivity}
                             onDeleteBot={handleDeleteBot}
                             onViewBot={handleViewBot}
-                            onSetTargetCoordinates={handleSetTargetCoordinates} // Pass the new handler
-                            isConnected={isConnected}
-                        />
+                             onSetTargetCoordinates={handleSetTargetCoordinates}
+                             // --- Pass Refactored Combat Props ---
+                             onGetNearbyEntities={handleGetNearbyEntities}
+                             onSetCombatTarget={handleSetCombatTarget} // Pass the new handler
+                             // onStartCombat and onStopCombat are removed
+                             nearbyEntitiesMap={nearbyEntitiesMap} // Pass the map down
+                             // --- End Refactored Combat Props ---
+                             isConnected={isConnected} // Pass isConnected down
+                         />
                     ) : (
                         !error && <p>Attempting to connect to the manager server...</p>
                     )}

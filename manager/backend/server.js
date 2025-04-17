@@ -128,7 +128,56 @@ io.on('connection', (socket) => {
          socket.emit('availableActivities', botManager.getAvailableActivities());
     });
 
-    socket.on('disconnect', () => {
+    // --- New listeners for Combat Activity ---
+    socket.on('startCombat', (payload) => {
+        console.log('Received startCombat:', payload);
+        if (payload && payload.botId && payload.targetId) {
+            // Pass targetId in the options object
+            botManager.changeActivity(payload.botId, 'combat', { targetId: payload.targetId });
+        } else {
+            console.error('Invalid startCombat payload:', payload);
+            socket.emit('error', 'Invalid startCombat payload: requires botId and targetId');
+        }
+    });
+
+    socket.on('stopCombat', (payload) => {
+        console.log('Received stopCombat:', payload);
+        if (payload && payload.botId) {
+            // Change back to a default idle activity to trigger combat unload
+            botManager.changeActivity(payload.botId, 'stand_still');
+        } else {
+            console.error('Invalid stopCombat payload:', payload);
+            socket.emit('error', 'Invalid stopCombat payload: requires botId');
+        }
+    });
+
+    socket.on('getNearbyEntities', (payload) => {
+        console.log('Received getNearbyEntities:', payload);
+        if (payload && payload.botId) {
+            const entities = botManager.getNearbyEntities(payload.botId);
+            // Emit back to the requesting client only
+            socket.emit('nearbyEntitiesList', { botId: payload.botId, entities: entities });
+        } else {
+             console.error('Invalid getNearbyEntities payload:', payload);
+              socket.emit('error', 'Invalid getNearbyEntities payload: requires botId');
+         }
+     });
+
+    socket.on('setCombatTarget', (payload) => {
+        console.log('Received setCombatTarget:', payload);
+        if (payload && payload.botId && payload.targetId !== undefined) { // Check targetId exists
+            botManager.setBotCombatTarget(payload.botId, payload.targetId);
+            // Optionally send confirmation back to client?
+            // socket.emit('combatTargetSet', { botId: payload.botId, targetId: payload.targetId });
+        } else {
+            console.error('Invalid setCombatTarget payload:', payload);
+            socket.emit('error', 'Invalid setCombatTarget payload: requires botId and targetId');
+        }
+    });
+     // --- End of New Listeners ---
+
+
+     socket.on('disconnect', () => {
         console.log('Manager client disconnected:', socket.id);
     });
 

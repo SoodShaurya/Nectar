@@ -9,6 +9,15 @@ export interface Bot {
     options: any;
 }
 
+// Define EntityInfo type (needed for combat target selection)
+export interface EntityInfo {
+    id: number | string;
+    username?: string;
+    name?: string;
+    type?: string;
+    position?: { x: number; y: number; z: number };
+}
+
 // Define the hook's return structure
 interface SocketHook {
     bots: Bot[];
@@ -18,12 +27,16 @@ interface SocketHook {
     error: string | null;
     connect: () => void;
     disconnect: () => void;
+    // --- Add nearbyEntitiesMap ---
+    nearbyEntitiesMap: { [botId: string]: EntityInfo[] | null };
 }
 
 // Hook implementation using Socket.IO
 export function useWebSocket(url: string | null): SocketHook {
     const [bots, setBots] = useState<Bot[]>([]);
     const [activities, setActivities] = useState<string[]>([]);
+    // --- Add nearbyEntitiesMap state ---
+    const [nearbyEntitiesMap, setNearbyEntitiesMap] = useState<{ [botId: string]: EntityInfo[] | null }>({});
     const [isConnected, setIsConnected] = useState<boolean>(false);
     const [error, setError] = useState<string | null>(null);
     const socketRef = useRef<Socket | null>(null);
@@ -102,12 +115,23 @@ export function useWebSocket(url: string | null): SocketHook {
 
         socket.on('error', (errorMessage: string) => { // Listen for custom 'error' events
              console.error('Server error message:', errorMessage);
-             setError(`Server Error: ${errorMessage}`);
-        });
+              setError(`Server Error: ${errorMessage}`);
+         });
 
-        // Add listeners for any other events from the default namespace here
+         // --- Listener for Nearby Entities ---
+         socket.on('nearbyEntitiesList', (payload: { botId: string; entities: EntityInfo[] }) => {
+             console.log(`Received nearbyEntitiesList for ${payload.botId}:`, payload.entities);
+             setNearbyEntitiesMap(prevMap => ({
+                 ...prevMap,
+                 [payload.botId]: payload.entities || [] // Update map for the specific bot
+             }));
+         });
+         // --- End Listener ---
 
-    }, [url, disconnect]);
+
+         // Add listeners for any other events from the default namespace here
+
+     }, [url, disconnect]); // Note: setNearbyEntitiesMap is stable and doesn't need to be in dependency array
 
     useEffect(() => {
         if (url) {
@@ -141,5 +165,7 @@ export function useWebSocket(url: string | null): SocketHook {
         sendMessage,
         connect,
         disconnect,
+        // --- Return nearbyEntitiesMap ---
+        nearbyEntitiesMap,
     };
 }
