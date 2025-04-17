@@ -1,5 +1,5 @@
 {
-  "name": "bot_manager_backend",
+  "name": "manager_backend",
   "version": "1.0.0",
   "description": "Backend for managing Mineflayer bots",
   "main": "server.js",

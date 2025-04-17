@@ -4,7 +4,7 @@ const path = require('path');
 const WebSocket = require('ws');
 const botManager = require('./botManager'); // We'll create this next
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 6900;
 
 // --- HTTP Server ---
 const server = http.createServer((req, res) => {
