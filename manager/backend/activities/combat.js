@@ -4,10 +4,35 @@ const { goals: { GoalFollow } } = require('../../../pathfinder/dist/index.js'); 
 // Store listeners per bot { botId: { listenerName: function } }
 let combatListeners = {};
 
-function load(bot, options = {}) { // Options now includes managerBotId
+// Helper function to equip shield (similar to examples)
+async function equipShield(bot) {
+    if (bot.supportFeature("doesntHaveOffHandSlot")) return false; // Cannot use shield
+    const shield = bot.inventory.items().find(item => item.name === 'shield');
+    if (!shield) {
+        console.log(`[Activity Combat ${bot.username}] No shield found in inventory.`);
+        return false;
+    }
+    const offHandItem = bot.inventory.slots[bot.getEquipmentDestSlot('off-hand')];
+    if (offHandItem?.name === 'shield') {
+        // console.log(`[Activity Combat ${bot.username}] Shield already equipped.`);
+        return true; // Already equipped
+    }
+    try {
+        console.log(`[Activity Combat ${bot.username}] Equipping shield...`);
+        await bot.equip(shield, 'off-hand');
+        return true;
+    } catch (err) {
+        console.error(`[Activity Combat ${bot.username}] Error equipping shield:`, err);
+        return false;
+    }
+}
+
+
+async function load(bot, options = {}) { // Options now includes managerBotId
     // Use managerBotId if available, otherwise fallback to username (less reliable)
     const managerBotId = options.managerBotId || bot.username;
     const botUsername = bot.username; // Keep for logging
+    // const useShield = options.useShield === true; // REMOVED - Shield is now default
 
     // Store managerBotId on the bot object for use in event handlers
     bot.managerBotId = managerBotId;
@@ -73,6 +98,16 @@ function load(bot, options = {}) { // Options now includes managerBotId
     bot.swordpvp.options.strafeConfig.mode.mode = 'intelligent'
     bot.swordpvp.options.tapConfig.enabled = true
     bot.swordpvp.options.tapConfig.mode = 'wtap'
+
+    // --- Shield Configuration (Now Default) ---
+    console.log(`[Activity Combat ${botUsername}] Enabling shield mode by default.`);
+    bot.swordpvp.options.shieldConfig.enabled = true;
+    bot.swordpvp.options.shieldConfig.mode = 'legit'; // Default to legit mode
+    // Attempt to equip shield - do not block loading if it fails
+    equipShield(bot).catch(err => console.error(`[Activity Combat ${botUsername}] Background shield equip failed:`, err));
+    // --- End Shield Configuration ---
+
+
     // --- Setup Listeners ---
     unloadListeners(bot); // Clear any previous listeners for this bot
     // Store listeners using managerBotId as key

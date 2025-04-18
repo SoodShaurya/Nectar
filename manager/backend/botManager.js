@@ -251,13 +251,33 @@ function createBot(options) {
                         const THREAT_RADIUS = 12; // Define threat radius locally
                         let primaryThreat = null;
 
-                        // Categorize threats
+                        // Categorize potential threats (gear-based or recent hostility)
                         for (const id in nearbyEntities) {
                             const entityData = nearbyEntities[id];
-                            if (entityData.threatLevel > 0 && entityData.distance <= THREAT_RADIUS) {
+                            // --- Added Debug Logging (Step 1) ---
+                            const entityNameForLog = entityData.username || entityData.name || `ID: ${entityData.id}`;
+                            console.log(`[DefenseMonitor ${botId} Check] Entity: ${entityNameForLog}, Type: ${entityData.type}, Kind: ${entityData.kind}, Threat: ${entityData.threatLevel}, Dist: ${entityData.distance.toFixed(1)}`);
+                            // --- End Debug Logging (Step 1) ---
+
+                            // Check if entity is within radius AND (is Hostile mob OR is a recently hostile player OR is a player with threatLevel > 0)
+                            const isRecentlyAttackedPlayer = entityData.type === 'player' && botData.bot.memory.isRecentlyHostile(entityData.username);
+                            const isHostileMob = entityData.kind === 'Hostile mobs'; // Use plural based on previous logs
+                            const isThreateningPlayer = entityData.type === 'player' && entityData.threatLevel > 0; // Add check for player threatLevel
+
+                            // --- Added Debug Logging ---
+                            console.log(`[DefenseMonitor ${botId} PreCheck] Entity: ${entityNameForLog}, Kind: '${entityData.kind}', IsHostileMob: ${isHostileMob}, IsRecentPlayer: ${isRecentlyAttackedPlayer}, IsThreateningPlayer: ${isThreateningPlayer}, Dist: ${entityData.distance.toFixed(1)}`);
+                            // --- End Debug Logging ---
+
+                            if (entityData.distance <= THREAT_RADIUS && (isHostileMob || isRecentlyAttackedPlayer || isThreateningPlayer)) {
+                                // --- Added Debug Logging ---
+                                console.log(`[DefenseMonitor ${botId} Qualify] Entity ${entityNameForLog} qualifies! (HostileMob: ${isHostileMob}, RecentPlayerAttack: ${isRecentlyAttackedPlayer}, ThreateningPlayer: ${isThreateningPlayer})`);
+                                // --- End Debug Logging ---
                                 if (entityData.type === 'player') {
                                     playerThreats.push(entityData);
                                 } else {
+                                   // --- Added Debug Logging ---
+                                   console.log(`[DefenseMonitor ${botId} AddOther] Adding ${entityNameForLog} to otherThreats.`);
+                                   // --- End Debug Logging ---
                                     otherThreats.push(entityData);
                                 }
                             }
@@ -276,10 +296,20 @@ function createBot(options) {
 
                         // Engage if a primary threat was selected
                         if (primaryThreat) {
+                            // --- Moved Debug Logging (Step 2) ---
+                            if (primaryThreat.type !== 'player') {
+                                console.log(`[DefenseMonitor ${botId} Prioritize] Prioritizing non-player threat: ID=${primaryThreat.id}, Type=${primaryThreat.type}, Kind=${primaryThreat.kind}, Name=${primaryThreat.name}, Threat=${primaryThreat.threatLevel}`);
+                            }
+                            // --- End Debug Logging (Step 2) ---
+
                             const targetName = primaryThreat.username || primaryThreat.name || 'Unknown Threat';
                             const newTargetIdentifier = primaryThreat.username || primaryThreat.id;
                             const currentTargetId = botData.bot.memory.getCombatTargetId();
                             const currentActivity = botData.bot.memory.getCurrentActivity(); // Get current activity
+
+                            // --- Added Debug Logging for Engagement Check ---
+                            console.log(`[DefenseMonitor ${botId} EngageCheck] CurrentActivity: ${currentActivity}, NewTargetID: ${newTargetIdentifier}, CurrentTargetID: ${currentTargetId}`);
+                            // --- End Debug Logging ---
 
                             // Engage if not already in combat OR if the highest priority target has changed
                             if (currentActivity !== 'combat' || newTargetIdentifier !== currentTargetId) {
@@ -490,6 +520,39 @@ function createBot(options) {
     }
 }
 
+// --- New function to set guard target ID ---
+function setBotGuardTarget(botId, targetId) {
+    const botData = activeBots[botId];
+    if (botData && botData.bot && botData.bot.memory) {
+        try {
+            // targetId can be string (username) or number (entity id)
+            botData.bot.memory.setGuardTargetId(targetId);
+            console.log(`[BotManager] Set guard target for ${botId} to ID: ${targetId}`);
+        } catch (error) {
+            console.error(`Error setting guard target for ${botId}:`, error);
+        }
+    } else {
+        console.warn(`Bot ${botId} not found or memory plugin not available for setting guard target.`);
+    }
+}
+
+// --- New function to set combat target ID ---
+function setBotCombatTarget(botId, targetId) {
+    const botData = activeBots[botId];
+    if (botData && botData.bot && botData.bot.memory) {
+        try {
+            // targetId can be string (username) or number (entity id)
+            botData.bot.memory.setCombatTargetId(targetId);
+            console.log(`[BotManager] Set combat target for ${botId} to ID: ${targetId}`);
+            // Optionally notify the frontend or log confirmation
+        } catch (error) {
+            console.error(`Error setting combat target for ${botId}:`, error);
+        }
+    } else {
+        console.warn(`Bot ${botId} not found or memory plugin not available for setting combat target.`);
+    }
+}
+
 function deleteBot(botId) {
     console.log(`Attempting to delete bot ${botId}`);
     const botData = activeBots[botId];
@@ -516,6 +579,7 @@ function deleteBot(botId) {
         console.warn(`Bot ${botId} not found for deletion.`);
     }
 }
+
 
 function shutdownAllBots() {
     console.log('Shutting down all bots...');
@@ -761,7 +825,8 @@ module.exports = {
     shutdownAllBots,
     setBotTargetCoordinates,
     getNearbyEntities,
-    setBotCombatTarget, // Export the new function
+    setBotCombatTarget,
+    setBotGuardTarget, // Export the new function
     // Export boost functions for potential external use/debugging if needed
     getPlayerThreatBoost,
     updatePlayerThreatBoost,

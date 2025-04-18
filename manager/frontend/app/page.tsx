@@ -88,13 +88,22 @@ export default function Home() {
      // New handler to set the target in memory
      const handleSetCombatTarget = useCallback((botId: string, targetId: string | number) => {
          console.log(`Setting combat target for ${botId} to ${targetId}`);
+         // Remove useShield from payload
          sendMessage('setCombatTarget', { botId, targetId });
-         // Optionally provide user feedback here (e.g., toast notification)
+         // Backend now handles changing activity to 'combat' and enabling shield by default
      }, [sendMessage]);
 
      // handleStartCombat and handleStopCombat are removed as combat is now triggered
      // by changing the activity via handleChangeActivity after setting the target.
      // --- End Refactored Combat Handlers ---
+
+     // --- Guard Handler ---
+     const handleSetGuardTarget = useCallback((guardingBotId: string, targetBotId: string) => {
+        console.log(`Setting guard target for ${guardingBotId} to ${targetBotId}`);
+        sendMessage('setGuardTarget', { guardingBotId, targetBotId });
+        // Backend will automatically change activity to 'guard'
+     }, [sendMessage]);
+     // --- End Guard Handler ---
 
 
      // Functions for viewer modal
@@ -182,6 +191,9 @@ export default function Home() {
                              // onStartCombat and onStopCombat are removed
                              nearbyEntitiesMap={nearbyEntitiesMap} // Pass the map down
                              // --- End Refactored Combat Props ---
+                             // --- Pass Guard Props ---
+                             onSetGuardTarget={handleSetGuardTarget} // Pass the guard handler
+                             // --- End Pass Guard Props ---
                              isConnected={isConnected} // Pass isConnected down
                          />
                     ) : (

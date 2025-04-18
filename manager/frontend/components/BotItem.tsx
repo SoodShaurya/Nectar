@@ -26,10 +26,14 @@ interface BotItemProps {
     onSetTargetCoordinates: (botId: string, coords: { x: number; y: number; z: number }) => void;
     // --- Refactored Combat Props ---
     onGetNearbyEntities: (botId: string) => void;
-    onSetCombatTarget: (botId: string, targetId: string | number) => void; // New prop
+    onSetCombatTarget: (botId: string, targetId: string | number) => void; // Reverted prop signature
     // onStartCombat and onStopCombat removed
     nearbyEntities: EntityInfo[] | null; // Entities specific to this bot, passed from parent
     // --- End Refactored Combat Props ---
+    // --- Guard Props ---
+    allBots: Bot[]; // Need the full list to populate the guard target dropdown
+    onSetGuardTarget: (guardingBotId: string, targetBotId: string) => void; // Function to call backend
+    // --- End Guard Props ---
     isDisabled: boolean; // Controls whether inputs/buttons are disabled
 }
 
@@ -46,6 +50,10 @@ const BotItem: React.FC<BotItemProps> = ({
     // onStartCombat and onStopCombat removed
     nearbyEntities,
     // --- End Destructure ---
+    // --- Destructure Guard Props ---
+    allBots,
+    onSetGuardTarget,
+    // --- End Destructure ---
     isDisabled,
 }) => {
     // State for activity dropdown
@@ -56,7 +64,11 @@ const BotItem: React.FC<BotItemProps> = ({
     const [targetZ, setTargetZ] = useState('');
     // --- New Combat State ---
     const [selectedTargetId, setSelectedTargetId] = useState<string | number>(''); // Can be username or entity ID
+    // const [useShield, setUseShield] = useState<boolean>(true); // REMOVED state
     // --- End New Combat State ---
+    // --- New Guard State ---
+    const [selectedGuardTargetId, setSelectedGuardTargetId] = useState<string>('');
+    // --- End Guard State ---
 
 
     // Update local activity state if the bot's activity prop changes from the server
@@ -106,13 +118,25 @@ const BotItem: React.FC<BotItemProps> = ({
     // --- New Handler for Setting Combat Target ---
      const handleSetCombatTargetClick = useCallback(() => {
         if (selectedTargetId) {
+            // Call without useShield argument
             onSetCombatTarget(bot.id, selectedTargetId);
-            alert(`Combat target set to ${selectedTargetId} for ${bot.id}. Change activity to 'combat' to start.`); // User feedback
+            alert(`Combat target set to ${selectedTargetId} for ${bot.id}. Activity changed to 'combat'. Shield will be used by default.`); // User feedback
         } else {
-            alert('Please select a target first.');
+            alert('Please select a combat target first.');
         }
-    }, [bot.id, selectedTargetId, onSetCombatTarget]);
+    }, [bot.id, selectedTargetId, onSetCombatTarget]); // Removed useShield from dependency array
     // --- End New Handler ---
+
+    // --- New Guard Handler ---
+    const handleSetGuardTargetClick = useCallback(() => {
+        if (selectedGuardTargetId) {
+            onSetGuardTarget(bot.id, selectedGuardTargetId);
+            alert(`Guard target set to ${selectedGuardTargetId} for ${bot.id}. Activity automatically changed to 'guard'.`); // User feedback
+        } else {
+            alert('Please select a guard target bot.');
+        }
+    }, [bot.id, selectedGuardTargetId, onSetGuardTarget]);
+    // --- End New Guard Handler ---
 
 
     return (
@@ -244,9 +268,36 @@ const BotItem: React.FC<BotItemProps> = ({
                         disabled={isDisabled || !selectedTargetId} // Disable only if no target selected or bot busy
                         style={{ padding: '5px 10px', backgroundColor: '#ff9800', color: 'white', border: 'none', borderRadius: '3px', cursor: 'pointer' }}
                     >
-                        Set Combat Target
+                         Set Combat Target
+                     </button>
+                     {/* Removed Use Shield checkbox */}
+                     {/* Attack and Stop Combat buttons removed */}
+                 </div>
+
+                 {/* Guard Target Controls */}
+                 <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                    <label>Guard Target:</label>
+                    <select
+                        value={selectedGuardTargetId}
+                        onChange={(e) => setSelectedGuardTargetId(e.target.value)}
+                        disabled={isDisabled || !allBots || allBots.length <= 1} // Disable if only this bot exists
+                        style={{ padding: '5px', minWidth: '150px' }}
+                    >
+                        <option value="" disabled>Select Bot to Guard...</option>
+                        {allBots?.filter(targetBot => targetBot.id !== bot.id) // Exclude self from list
+                                .map((targetBot) => (
+                            <option key={targetBot.id} value={targetBot.id}>
+                                {targetBot.id}
+                            </option>
+                        ))}
+                    </select>
+                     <button
+                        onClick={handleSetGuardTargetClick}
+                        disabled={isDisabled || !selectedGuardTargetId}
+                        style={{ padding: '5px 10px', backgroundColor: '#4CAF50', color: 'white', border: 'none', borderRadius: '3px', cursor: 'pointer' }}
+                    >
+                        Set Guard Target
                     </button>
-                    {/* Attack and Stop Combat buttons removed */}
                 </div>
 
             </div>

@@ -28,9 +28,12 @@ interface BotListProps {
     // --- Add Combat Props ---
     onGetNearbyEntities: (botId: string) => void;
     // onStartCombat and onStopCombat removed
-    onSetCombatTarget: (botId: string, targetId: string | number) => void; // Added prop
+    onSetCombatTarget: (botId: string, targetId: string | number) => void; // Reverted prop signature
     nearbyEntitiesMap: { [botId: string]: EntityInfo[] | null }; // Expect map from parent
     // --- End Combat Props ---
+    // --- Add Guard Prop ---
+    onSetGuardTarget: (guardingBotId: string, targetBotId: string) => void;
+    // --- End Guard Prop ---
     isConnected: boolean; // To determine overall state
 }
 
@@ -46,6 +49,9 @@ const BotList: React.FC<BotListProps> = ({
     // onStartCombat and onStopCombat removed
     onSetCombatTarget, // Destructure new prop
     nearbyEntitiesMap, // Destructure map from props
+    // --- End Destructure ---
+    // --- Destructure Guard Prop ---
+    onSetGuardTarget,
     // --- End Destructure ---
     isConnected,
 }) => {
@@ -77,6 +83,10 @@ const BotList: React.FC<BotListProps> = ({
                     // onStartCombat and onStopCombat removed
                     nearbyEntities={nearbyEntitiesMap[bot.id] || null} // Pass entities for this specific bot
                     // --- End Pass Combat Props ---
+                    // --- Pass Guard Props Down ---
+                    allBots={bots} // Pass the full list for the dropdown
+                    onSetGuardTarget={onSetGuardTarget} // Pass the handler down
+                    // --- End Pass Guard Props ---
                     // Disable controls if bot is not idle or disconnected
                     isDisabled={bot.status !== 'idle'} // isConnected check is already done above
                 />

@@ -163,15 +163,36 @@ io.on('connection', (socket) => {
          }
      });
 
+    // Reverted: Shield is now default in combat activity
     socket.on('setCombatTarget', (payload) => {
         console.log('Received setCombatTarget:', payload);
         if (payload && payload.botId && payload.targetId !== undefined) { // Check targetId exists
+            // 1. Set the target in memory
             botManager.setBotCombatTarget(payload.botId, payload.targetId);
+            // 2. Change activity to combat (no options needed for shield)
+            //    The combat activity will read targetId from memory and enable shield by default
+            botManager.changeActivity(payload.botId, 'combat');
             // Optionally send confirmation back to client?
             // socket.emit('combatTargetSet', { botId: payload.botId, targetId: payload.targetId });
         } else {
             console.error('Invalid setCombatTarget payload:', payload);
             socket.emit('error', 'Invalid setCombatTarget payload: requires botId and targetId');
+        }
+    });
+
+    socket.on('setGuardTarget', (payload) => {
+        console.log('Received setGuardTarget:', payload);
+        if (payload && payload.guardingBotId && payload.targetBotId) {
+            // 1. Set the target in the guarding bot's memory
+            botManager.setBotGuardTarget(payload.guardingBotId, payload.targetBotId);
+            // 2. Change the guarding bot's activity to 'guard'
+            //    The guard activity itself will read the target from memory
+            botManager.changeActivity(payload.guardingBotId, 'guard');
+            // Optionally send confirmation back
+            // socket.emit('guardTargetSet', { guardingBotId: payload.guardingBotId, targetBotId: payload.targetBotId });
+        } else {
+            console.error('Invalid setGuardTarget payload:', payload);
+            socket.emit('error', 'Invalid setGuardTarget payload: requires guardingBotId and targetBotId');
         }
     });
      // --- End of New Listeners ---

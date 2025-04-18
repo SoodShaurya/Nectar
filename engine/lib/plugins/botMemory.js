@@ -3,6 +3,7 @@ const mcData = require('minecraft-data'); // Required for item checks
 
 const DEFAULT_UPDATE_INTERVAL = 200; // ms - Faster updates for quicker reaction
 const DEFAULT_NEARBY_RADIUS = 32; // blocks - Radius to scan for entities
+const HOSTILITY_TIMEOUT = 5000; // ms - How long an attack makes someone hostile (5 seconds)
 
 // Helper function to check if an item is a weapon
 function isWeapon(item) {
@@ -71,10 +72,12 @@ class BotMemory {
     this.currentActivity = null; // String name of the current activity
     this.targetCoordinates = null; // Vec3 | null - Target for pathfinding or other activities
     this.combatTargetId = null; // String | number | null - Target ID for combat activity
+    this.guardTargetId = null; // String | number | null - Target ID for guard activity
     this.updateIntervalId = null;
     this.nearbyRadius = DEFAULT_NEARBY_RADIUS;
     this.strengthLevel = 0; // Bot's own calculated strength
     this.interruptedActivity = null; // Activity interrupted by defense monitor
+    this.recentAttackers = {}; // { username: timestamp } - Tracks recent attackers
   }
 
   /**
@@ -123,7 +126,7 @@ class BotMemory {
 
         // Determine threat level
         if (entity.kind === 'Hostile mob') {
-          threatLevel = 2; // Base threat for hostile mobs
+          // threatLevel = 2; // REMOVED - Threat level no longer used for hostile mobs
           // Optional: Could increase based on mob equipment later
         } else if (entity.type === 'player') {
           // Check if the player is a managed bot using the attached reference
@@ -188,6 +191,14 @@ class BotMemory {
 
     // Update the bot's own strength level after updating nearby entities
     this._updateStrengthLevel();
+
+    // Clean up old attackers
+    const now = Date.now();
+    for (const username in this.recentAttackers) {
+      if (now - this.recentAttackers[username] > HOSTILITY_TIMEOUT) {
+        delete this.recentAttackers[username];
+      }
+    }
   }
 
   /**
@@ -236,6 +247,29 @@ class BotMemory {
   _updateBotDistances(distancesMap) {
     this.botDistances = distancesMap;
     // console.log(`[BotMemory ${this.bot.username}] Updated bot distances:`, this.botDistances); // Optional: for debugging
+  }
+
+  /**
+   * Registers that a player has attacked the bot.
+   * @param {string} username - The username of the attacking player.
+   */
+  registerAttack(username) {
+    if (!username) return;
+    this.recentAttackers[username] = Date.now();
+    // console.log(`[BotMemory ${this.bot.username}] Registered attack from ${username}`); // Optional debug log
+  }
+
+  /**
+   * Checks if a player has attacked the bot recently.
+   * @param {string} username - The username of the player to check.
+   * @returns {boolean} True if the player attacked within the HOSTILITY_TIMEOUT.
+   */
+  isRecentlyHostile(username) {
+    if (!username || !this.recentAttackers[username]) {
+      return false;
+    }
+    const lastAttackTime = this.recentAttackers[username];
+    return (Date.now() - lastAttackTime) <= HOSTILITY_TIMEOUT;
   }
 
   // --- Public Accessors ---
@@ -311,6 +345,23 @@ class BotMemory {
   }
 
   /**
+   * Sets the guard target ID in the bot's memory.
+   * @param {string | number | null} targetId - The entity ID or username of the target, or null to clear.
+   */
+  setGuardTargetId(targetId) {
+    this.guardTargetId = targetId;
+    // console.log(`[BotMemory ${this.bot.username}] Guard target ID set to:`, this.guardTargetId); // Optional: for debugging
+  }
+
+  /**
+   * Gets the guard target ID from the bot's memory.
+   * @returns {string | number | null} The target ID or null if not set.
+   */
+  getGuardTargetId() {
+    return this.guardTargetId;
+  }
+
+  /**
    * Gets the bot's calculated strength level.
    * @returns {number} The strength level.
    */
@@ -339,6 +390,18 @@ class BotMemory {
 // The main plugin function injected into Mineflayer
 function inject(bot) {
   bot.memory = new BotMemory(bot);
+
+  // Listen for attacks on the bot
+  bot.on('attack', (attacker, victim, weapon) => {
+    // Check if the bot itself was the victim and the attacker is a player
+    if (victim === bot.entity && attacker && attacker.type === 'player' && attacker.username) {
+      // Check if the attacker is not a managed bot (avoid friendly fire issues)
+      const isManaged = bot.botManagerRef?.isManagedBot(attacker.username);
+      if (!isManaged) {
+        bot.memory.registerAttack(attacker.username);
+      }
+    }
+  });
 }
 
 module.exports = inject;
