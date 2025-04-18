@@ -30,8 +30,27 @@ const BOT_DISTANCE_UPDATE_INTERVAL = 5000; // ms - How often to update distances
 let activeBots = {}; // Store bot instances and data: { botId: { bot: instance, status: '...', activity: '...', options: {...}, viewerSocket: socketInstance, primitives: {} } }
 let broadcast; // Function to send messages to all clients
 let botDistanceUpdateInterval = null; // Interval ID for distance updates
+let playerThreatBoosts = {}; // { playerName: boostAmount } - Stores persistent threat boosts
 
 const activitiesDir = path.join(__dirname, 'activities');
+
+// --- Threat Boost Management ---
+function getPlayerThreatBoost(playerName) {
+    return playerThreatBoosts[playerName] || 0;
+}
+
+function updatePlayerThreatBoost(playerName, boostToAdd) {
+    const currentBoost = getPlayerThreatBoost(playerName);
+    playerThreatBoosts[playerName] = currentBoost + boostToAdd;
+    console.log(`[ThreatBoost] Updated boost for ${playerName}. Added: ${boostToAdd}, New Total: ${playerThreatBoosts[playerName]}`);
+    // TODO: Consider persisting this data if needed across manager restarts
+}
+
+// --- Helper Function ---
+function isManagedBot(playerName) {
+    // Check if any active bot has the given username
+    return Object.values(activeBots).some(botData => botData.options?.username === playerName);
+}
 
 // --- Initialization ---
 function init(broadcastFunction) {
@@ -116,7 +135,8 @@ function createBot(options) {
         status: 'connecting',
         activity: null,
         options: options,
-        activityInterval: null,
+        activityInterval: null, // Interval for the *activity* itself, if any
+        defenseMonitorInterval: null, // Interval for the persistent defense monitor
         viewerSocket: null, // Initialize viewer socket
         primitives: {} // Store drawn primitives for this bot
     };
@@ -132,13 +152,19 @@ function createBot(options) {
             checkTimeoutInterval: 60 * 1000, // Increase timeout interval
             plugins: [ // Use array format for plugins when using loader functions
                 botMemoryPlugin, // Load the memory plugin
-                pathfinderPluginLoader(), // Load the pathfinder plugin using its exported loader
+                pathfinderPluginLoader({ // Pass options object
+                    moveSettings: {
+                        canDig: true, // Explicitly keep true
+                    }
+                }), // Load the pathfinder plugin using its exported loader
                 combatPluginLoader // Load the combat plugin
                 // Add any other essential plugins if needed later
             ]
         });
 
+        bot.botManagerRef = module.exports; // Attach manager reference
         activeBots[botId].bot = bot;
+
 
         // --- Viewer Integration ---
         const viewerSocket = io('ws://localhost:6900/viewer', { // Connect to the viewer namespace
@@ -204,6 +230,90 @@ function createBot(options) {
 
             // Load default activity after spawn
             changeActivity(botId, 'stand_still'); // Default activity
+
+            // --- Start Persistent Defense Monitor ---
+            if (activeBots[botId] && !activeBots[botId].defenseMonitorInterval) {
+                console.log(`[BotManager ${botId}] Starting persistent defense monitor.`);
+                activeBots[botId].defenseMonitorInterval = setInterval(() => {
+                    const botData = activeBots[botId];
+                    // Ensure bot and memory are still valid
+                    if (!botData || !botData.bot || !botData.bot.memory || !botData.bot.entity) {
+                        // console.warn(`[DefenseMonitor ${botId}] Bot or memory not available, skipping check.`);
+                        return;
+                    }
+
+                    try {
+                        // Removed check for currentActivity === 'combat' to allow dynamic target switching
+
+                        const nearbyEntities = botData.bot.memory.getNearbyEntities();
+                        const playerThreats = [];
+                        const otherThreats = [];
+                        const THREAT_RADIUS = 12; // Define threat radius locally
+                        let primaryThreat = null;
+
+                        // Categorize threats
+                        for (const id in nearbyEntities) {
+                            const entityData = nearbyEntities[id];
+                            if (entityData.threatLevel > 0 && entityData.distance <= THREAT_RADIUS) {
+                                if (entityData.type === 'player') {
+                                    playerThreats.push(entityData);
+                                } else {
+                                    otherThreats.push(entityData);
+                                }
+                            }
+                        }
+
+                        // Prioritize closest player threat
+                        if (playerThreats.length > 0) {
+                            playerThreats.sort((a, b) => a.distance - b.distance); // Sort by distance ascending
+                            primaryThreat = playerThreats[0];
+                        }
+                        // If no player threats, target closest other threat
+                        else if (otherThreats.length > 0) {
+                            otherThreats.sort((a, b) => a.distance - b.distance); // Sort by distance ascending
+                            primaryThreat = otherThreats[0];
+                        }
+
+                        // Engage if a primary threat was selected
+                        if (primaryThreat) {
+                            const targetName = primaryThreat.username || primaryThreat.name || 'Unknown Threat';
+                            const newTargetIdentifier = primaryThreat.username || primaryThreat.id;
+                            const currentTargetId = botData.bot.memory.getCombatTargetId();
+                            const currentActivity = botData.bot.memory.getCurrentActivity(); // Get current activity
+
+                            // Engage if not already in combat OR if the highest priority target has changed
+                            if (currentActivity !== 'combat' || newTargetIdentifier !== currentTargetId) {
+                                console.log(`[DefenseMonitor ${botId}] New/Different threat detected: ${targetName} (Threat: ${primaryThreat.threatLevel}, Dist: ${primaryThreat.distance.toFixed(1)}). Engaging.`);
+
+                                // Store the activity being interrupted
+                                botData.bot.memory.setInterruptedActivity(currentActivity || 'stand_still'); // Default to stand_still if null
+
+                                // Get levels for chat message
+                                const botStrength = botData.bot.memory.getStrengthLevel();
+                                const targetThreat = primaryThreat.threatLevel; // Already calculated
+
+                                // Send chat message
+                                botData.bot.chat(`Engaging ${targetName}! My Strength: ${botStrength}, Target Threat: ${targetThreat}`);
+
+                                // Set combat target in memory
+                                setBotCombatTarget(botId, newTargetIdentifier);
+
+                                // Switch activity to combat (this will unload the current activity if already running)
+                                changeActivity(botId, 'combat');
+                            }
+                            // else {
+                                // Optional: Log that the target remains the same and no action is needed
+                                // console.log(`[DefenseMonitor ${botId}] Target ${targetName} is already the current combat target. No switch needed.`);
+                            // }
+                        }
+                    } catch(error) {
+                         console.error(`[DefenseMonitor ${botId}] Error during check:`, error);
+                    }
+
+                }, 200); // Check every 200ms
+            }
+            // --- End Persistent Defense Monitor ---
+
             broadcastBotList();
         });
 
@@ -211,9 +321,14 @@ function createBot(options) {
             console.error(`Bot ${botId} error:`, err);
             if (activeBots[botId]) {
                  activeBots[botId].status = `error: ${err.message}`;
+                 // Clear intervals on error
                  if (activeBots[botId].activityInterval) {
                     clearInterval(activeBots[botId].activityInterval);
                     activeBots[botId].activityInterval = null;
+                 }
+                 if (activeBots[botId].defenseMonitorInterval) {
+                    clearInterval(activeBots[botId].defenseMonitorInterval);
+                    activeBots[botId].defenseMonitorInterval = null;
                  }
                  activeBots[botId].activity = 'error';
 
@@ -236,9 +351,14 @@ function createBot(options) {
             console.log(`Bot ${botId} kicked for:`, reason);
              if (activeBots[botId]) {
                 activeBots[botId].status = `kicked: ${reason}`;
-                if (activeBots[botId].activityInterval) {
+                 // Clear intervals on kick
+                 if (activeBots[botId].activityInterval) {
                     clearInterval(activeBots[botId].activityInterval);
                     activeBots[botId].activityInterval = null;
+                 }
+                 if (activeBots[botId].defenseMonitorInterval) {
+                    clearInterval(activeBots[botId].defenseMonitorInterval);
+                    activeBots[botId].defenseMonitorInterval = null;
                  }
                 activeBots[botId].activity = 'kicked';
 
@@ -263,9 +383,14 @@ function createBot(options) {
             bot.removeListener('move', sendViewerPosition);
             if (activeBots[botId]) {
                 activeBots[botId].status = `disconnected: ${reason}`;
+                 // Clear intervals on end
                  if (activeBots[botId].activityInterval) {
                     clearInterval(activeBots[botId].activityInterval);
                     activeBots[botId].activityInterval = null;
+                 }
+                 if (activeBots[botId].defenseMonitorInterval) {
+                    clearInterval(activeBots[botId].defenseMonitorInterval);
+                    activeBots[botId].defenseMonitorInterval = null;
                  }
                 activeBots[botId].activity = 'disconnected';
 
@@ -320,6 +445,41 @@ function createBot(options) {
             // TODO: Add methods for other shapes if needed (spheres, paths etc.)
         };
 
+        // --- Bot Death Listener for Threat Boost ---
+        bot.on('death', () => {
+            // This basic 'death' event doesn't provide the killer.
+            // We might need to listen to 'entityGone' and correlate with recent damage,
+            // or parse death messages in chat ('kicked' event might have some info sometimes).
+            // This is complex and requires more sophisticated event handling or chat parsing.
+
+            // Placeholder logic assuming we *could* get the killer entity/name
+            console.log(`Bot ${botId} died. Checking for player kill boost...`);
+            const killer = null; // = findKillerLogic(); // <<<< Needs implementation
+
+            if (killer && killer.type === 'player' && !isManagedBot(killer.username)) { // Need isManagedBot helper or access
+                const killedBotStrength = bot.memory?.getStrengthLevel() || 0; // Get last known strength
+
+                // Calculate killer's threat at time of death (needs helpers from botMemory or duplication)
+                // This is tricky because the killer entity might already be gone or changed state.
+                // We'd ideally use the killer entity state *just before* the kill.
+                // const killerThreatLevel = calculateThreatLevelForEntity(killer); // <<<< Needs implementation
+
+                // Example placeholder calculation:
+                const killerThreatLevel = 5; // Replace with actual calculation if possible
+
+                console.log(`Killed by ${killer.username}. Bot Strength: ${killedBotStrength}, Killer Threat: ${killerThreatLevel}`);
+
+                if (killerThreatLevel <= killedBotStrength) {
+                    const boostToAdd = (killedBotStrength - killerThreatLevel) + 1;
+                    console.log(`Applying threat boost of ${boostToAdd} to ${killer.username}`);
+                    updatePlayerThreatBoost(killer.username, boostToAdd);
+                }
+            } else {
+                 console.log(`Bot ${botId} death cause not identified as eligible player kill.`);
+            }
+        });
+        // NOTE: Proper killer identification is the main challenge here.
+
     } catch (error) {
         console.error(`Failed to create bot ${botId}:`, error);
         if (activeBots[botId]) {
@@ -343,6 +503,10 @@ function deleteBot(botId) {
         if (botData.bot) {
             unloadActivity(botData.bot, botData.activity); // Attempt to clean up activity
             botData.bot.quit();
+        }
+        // Clear defense interval on delete
+        if (botData.defenseMonitorInterval) {
+            clearInterval(botData.defenseMonitorInterval);
         }
         // Remove from our management
         delete activeBots[botId];
@@ -382,44 +546,47 @@ function changeActivity(botId, newActivityName, options = {}) {
         unloadActivity(botData.bot, botData.activity);
     }
 
-    // Load new activity, passing options
-    loadActivity(botData.bot, newActivityName, options);
+    // Load new activity, passing options and the manager's botId
+    loadActivity(botId, botData.bot, newActivityName, options); // Pass botId here
     botData.activity = newActivityName; // Update current activity name
     broadcastBotList(); // Update frontend with new activity
 }
 
-// Modified to accept and pass options
-function loadActivity(bot, activityName, options = {}) {
-    const botId = bot.username; // Assuming username is part of botId logic
+// Modified to accept managerBotId and pass options
+function loadActivity(managerBotId, bot, activityName, options = {}) { // Added managerBotId param
+    const botUsername = bot.username; // Keep for logging clarity
     const activityPath = path.join(activitiesDir, `${activityName}.js`);
     try {
+        // Add managerBotId to options passed to the activity
+        const activityOptions = { ...options, managerBotId: managerBotId };
+
         // Clear cache for dynamic loading/reloading
         delete require.cache[require.resolve(activityPath)];
         const activityModule = require(activityPath);
         if (activityModule.load && typeof activityModule.load === 'function') {
-            console.log(`Loading activity "${activityName}" for bot ${botId} with options:`, options);
-            // Pass options to the activity's load function
-            const intervalId = activityModule.load(bot, options); // Activity might return an interval ID
-            if (intervalId && activeBots[botId]) {
-                 activeBots[botId].activityInterval = intervalId; // Store interval if returned
+            console.log(`Loading activity "${activityName}" for bot ${botUsername} (ID: ${managerBotId}) with options:`, activityOptions);
+            // Pass extended options (including managerBotId) to the activity's load function
+            const intervalId = activityModule.load(bot, activityOptions); // Activity might return an interval ID
+            if (intervalId && activeBots[managerBotId]) { // Use managerBotId for lookup
+                 activeBots[managerBotId].activityInterval = intervalId; // Store interval if returned
             }
             // Update memory with the new activity name
             if (bot.memory) {
                 bot.memory._setActivity(activityName);
             }
         } else {
-            console.error(`Activity module ${activityName} does not have a valid load function.`);
+            console.error(`Activity module ${activityName} does not have a valid load function for bot ${botUsername}.`);
             // Set memory activity to error if load fails structurally
             if (bot.memory) {
                 bot.memory._setActivity('error:invalid_module');
             }
         }
     } catch (error) {
-        console.error(`Failed to load activity "${activityName}" for bot ${botId}:`, error);
+        console.error(`Failed to load activity "${activityName}" for bot ${botUsername} (ID: ${managerBotId}):`, error);
         // Potentially set bot status to error or revert activity
-        if(activeBots[botId]) {
-            activeBots[botId].status = `activity_error: ${activityName}`;
-            activeBots[botId].activity = 'error';
+        if(activeBots[managerBotId]) { // Use managerBotId for lookup
+            activeBots[managerBotId].status = `activity_error: ${activityName}`;
+            activeBots[managerBotId].activity = 'error';
             // Update memory activity on load error
             if (bot.memory) {
                 bot.memory._setActivity('error:load_failed');
@@ -594,5 +761,9 @@ module.exports = {
     shutdownAllBots,
     setBotTargetCoordinates,
     getNearbyEntities,
-    setBotCombatTarget // Export the new function
+    setBotCombatTarget, // Export the new function
+    // Export boost functions for potential external use/debugging if needed
+    getPlayerThreatBoost,
+    updatePlayerThreatBoost,
+    isManagedBot // Export the new helper function
 };

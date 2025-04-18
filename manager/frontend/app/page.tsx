@@ -8,7 +8,7 @@ import BotViewer from '@/components/BotViewer'; // Import the new viewer compone
 export default function Home() {
     // State for form inputs
     const [serverAddress, setServerAddress] = useState('localhost'); // Default to localhost
-    const [serverPort, setServerPort] = useState('6900'); // Default to backend port
+    const [serverPort, setServerPort] = useState('25567'); // Default to standard Minecraft port
     const [username, setUsername] = useState('');
     const [version, setVersion] = useState(''); // e.g., 1.20.1
 
@@ -130,7 +130,7 @@ export default function Home() {
                     <input
                         type="number"
                         id="server-port"
-                        placeholder="e.g., 25565"
+                        placeholder="25567"
                         value={serverPort}
                         onChange={(e) => setServerPort(e.target.value)}
                         style={{ marginRight: '10px', padding: '5px' }}

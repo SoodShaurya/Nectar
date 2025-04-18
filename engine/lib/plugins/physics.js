@@ -409,15 +409,19 @@ function inject (bot, { physicsEnabled, maxCatchupTicks }) {
   })
 
   bot._client.on('explosion', explosion => {
-    // TODO: emit an explosion event with more info
+    // PATCHED: Handle bad playerMotion values safely
+    const { playerMotionX, playerMotionY, playerMotionZ } = explosion
+    const isFiniteVec = (...vals) => vals.every(Number.isFinite)
+  
     if (bot.physicsEnabled && bot.game.gameMode !== 'creative') {
-      if (explosion.playerKnockback) { // 1.21.3+
-        bot.entity.velocity.add(explosion.playerMotionX, explosion.playerMotionY, explosion.playerMotionZ)
-      }
-      if ('playerMotionX' in explosion) {
-        bot.entity.velocity.x += explosion.playerMotionX
-        bot.entity.velocity.y += explosion.playerMotionY
-        bot.entity.velocity.z += explosion.playerMotionZ
+      if (explosion.playerKnockback && isFiniteVec(playerMotionX, playerMotionY, playerMotionZ)) {
+        bot.entity.velocity.add(playerMotionX, playerMotionY, playerMotionZ)
+      } else if ('playerMotionX' in explosion && isFiniteVec(playerMotionX, playerMotionY, playerMotionZ)) {
+        bot.entity.velocity.x += playerMotionX
+        bot.entity.velocity.y += playerMotionY
+        bot.entity.velocity.z += playerMotionZ
+      } else {
+        console.warn('Ignored malformed explosion packet:', explosion)
       }
     }
   })
