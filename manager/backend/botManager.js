@@ -243,6 +243,26 @@ function createBot(options) {
                     }
 
                     try {
+                        const currentActivity = botData.bot.memory.getCurrentActivity(); // Get current activity early
+
+                        // --- Group Up Check ---
+                        const COMBINED_THREAT_RADIUS = 16; // Define radius for combined check
+                        const COMBINED_STRENGTH_RADIUS = 10; // Define radius for ally strength check
+
+                        const combinedPlayerThreat = botData.bot.memory.calculateCombinedPlayerThreat(COMBINED_THREAT_RADIUS);
+                        const combinedAllyStrength = botData.bot.memory.calculateCombinedAllyStrength(COMBINED_STRENGTH_RADIUS);
+
+                        // console.log(`[DefenseMonitor ${botId}] Combined Threat (${COMBINED_THREAT_RADIUS}b): ${combinedPlayerThreat}, Combined Strength (${COMBINED_STRENGTH_RADIUS}b): ${combinedAllyStrength}`); // Optional Debug
+
+                        if (combinedPlayerThreat > combinedAllyStrength && currentActivity !== 'groupUp') {
+                            console.log(`[DefenseMonitor ${botId}] Combined Threat (${combinedPlayerThreat}) exceeds Combined Strength (${combinedAllyStrength}). Triggering Group Up.`);
+                            botData.bot.memory.setInterruptedActivity(currentActivity || 'stand_still'); // Store interrupted activity
+                            changeActivity(botId, 'groupUp', { requiredStrength: combinedPlayerThreat });
+                            return; // Use return to exit the current interval callback execution
+                        }
+                        // --- End Group Up Check ---
+
+
                         // Removed check for currentActivity === 'combat' to allow dynamic target switching
 
                         const nearbyEntities = botData.bot.memory.getNearbyEntities();
@@ -305,7 +325,7 @@ function createBot(options) {
                             const targetName = primaryThreat.username || primaryThreat.name || 'Unknown Threat';
                             const newTargetIdentifier = primaryThreat.username || primaryThreat.id;
                             const currentTargetId = botData.bot.memory.getCombatTargetId();
-                            const currentActivity = botData.bot.memory.getCurrentActivity(); // Get current activity
+                            // currentActivity is already fetched earlier
 
                             // --- Added Debug Logging for Engagement Check ---
                             console.log(`[DefenseMonitor ${botId} EngageCheck] CurrentActivity: ${currentActivity}, NewTargetID: ${newTargetIdentifier}, CurrentTargetID: ${currentTargetId}`);
@@ -830,5 +850,20 @@ module.exports = {
     // Export boost functions for potential external use/debugging if needed
     getPlayerThreatBoost,
     updatePlayerThreatBoost,
-    isManagedBot // Export the new helper function
+    isManagedBot, // Export the new helper function
+
+    // --- Helper Functions for Activities ---
+    getBotById: (botId) => {
+        return activeBots[botId]?.bot || null;
+    },
+    getBotActivity: (botId) => {
+        // Access memory through the bot instance if it exists
+        const bot = activeBots[botId]?.bot;
+        return bot?.memory?.getCurrentActivity() || null;
+    },
+    getBotStrength: (botId) => {
+        // Access memory through the bot instance if it exists
+        const bot = activeBots[botId]?.bot;
+        return bot?.memory?.getStrengthLevel() ?? null; // Return null if strength cannot be retrieved
+    }
 };

@@ -78,6 +78,12 @@ class BotMemory {
     this.strengthLevel = 0; // Bot's own calculated strength
     this.interruptedActivity = null; // Activity interrupted by defense monitor
     this.recentAttackers = {}; // { username: timestamp } - Tracks recent attackers
+
+    // --- Group Up State ---
+    this.isGroupingUp = false; // Is the bot currently involved in a group up?
+    this.groupUpRequester = null; // Username of the bot that requested this bot to group up (if applicable)
+    this.groupUpTarget = null; // Username of the bot this bot is pathfinding towards (if requester)
+    this.groupUpTargetCoords = null; // Vec3 coordinates of the target location (used by allies)
   }
 
   /**
@@ -385,6 +391,105 @@ class BotMemory {
   getInterruptedActivity() {
     return this.interruptedActivity;
   }
+
+  // --- Group Up Specific Methods ---
+
+  /**
+   * Calculates the combined threat level of nearby non-managed players.
+   * @param {number} radius - The radius within which to check for players.
+   * @returns {number} The sum of threat levels of players within the radius.
+   */
+  calculateCombinedPlayerThreat(radius) {
+    let combinedThreat = 0;
+    for (const entityId in this.nearbyEntities) {
+      const entityData = this.nearbyEntities[entityId];
+      // Check if it's a player, within the specified radius, and has a threat level > 0
+      if (entityData.type === 'player' && entityData.distance <= radius && entityData.threatLevel > 0) {
+        // We don't need to check isManagedBot here because threatLevel is already 0 for them
+        combinedThreat += entityData.threatLevel;
+      }
+    }
+    // console.log(`[BotMemory ${this.bot.username}] Combined Player Threat (${radius}b): ${combinedThreat}`); // Optional Debug
+    return combinedThreat;
+  }
+
+  /**
+   * Calculates the combined strength level of nearby allied bots (including self).
+   * @param {number} radius - The radius within which to check for allied bots.
+   * @returns {number} The sum of strength levels of allied bots within the radius.
+   */
+  calculateCombinedAllyStrength(radius) {
+    let combinedStrength = this.strengthLevel; // Start with own strength
+
+    if (!this.bot.botManagerRef) {
+      console.warn(`[BotMemory ${this.bot.username}] Cannot calculate combined ally strength: botManagerRef is missing.`);
+      return combinedStrength; // Return own strength if manager ref is missing
+    }
+
+    for (const botId in this.botDistances) {
+      const distance = this.botDistances[botId];
+      if (distance <= radius) {
+        // Need a way to get strength from botManagerRef
+        const allyStrength = this.bot.botManagerRef.getBotStrength(botId); // Assumes getBotStrength exists in botManager
+        if (allyStrength !== null) { // Check if strength was retrieved successfully
+            combinedStrength += allyStrength;
+        } else {
+             console.warn(`[BotMemory ${this.bot.username}] Could not get strength for nearby bot ${botId}`);
+        }
+      }
+    }
+    // console.log(`[BotMemory ${this.bot.username}] Combined Ally Strength (${radius}b): ${combinedStrength}`); // Optional Debug
+    return combinedStrength;
+  }
+
+  /** Sets the grouping up state. */
+  setGroupingUp(isGrouping) {
+    this.isGroupingUp = !!isGrouping; // Coerce to boolean
+  }
+
+  /** Gets the grouping up state. */
+  isGroupingUp() {
+    return this.isGroupingUp;
+  }
+
+  /** Sets the username of the bot requesting the group up. */
+  setGroupUpRequester(username) {
+    this.groupUpRequester = username;
+  }
+
+  /** Gets the username of the bot requesting the group up. */
+  getGroupUpRequester() {
+    return this.groupUpRequester;
+  }
+
+  /** Sets the username of the target bot for the requester. */
+  setGroupUpTarget(username) {
+    this.groupUpTarget = username;
+  }
+
+  /** Gets the username of the target bot for the requester. */
+  getGroupUpTarget() {
+    return this.groupUpTarget;
+  }
+
+  /** Sets the target coordinates for an ally bot. */
+  setGroupUpTargetCoords(coords) {
+    this.groupUpTargetCoords = coords instanceof Vec3 ? coords.clone() : null;
+  }
+
+  /** Gets the target coordinates for an ally bot. */
+  getGroupUpTargetCoords() {
+    return this.groupUpTargetCoords;
+  }
+
+   /**
+   * Gets the bot's current position.
+   * @returns {Vec3 | null} The bot's current position or null if not available.
+   */
+  getCurrentPosition() {
+      return this.bot.entity ? this.bot.entity.position.clone() : null;
+  }
+
 }
 
 // The main plugin function injected into Mineflayer
