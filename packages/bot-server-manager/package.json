@@ -1,0 +1,32 @@
+{
+  "name": "@aetherius/bot-server-manager",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Aetherius Bot Server Manager (BSM) - Agent Lifecycle & Communication Relay",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc -w & nodemon dist/index.js"
+  },
+  "keywords": [
+    "aetherius",
+    "bsm",
+    "bot",
+    "agent",
+    "manager",
+    "minecraft"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@aetherius/shared-types": "workspace:*",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "@types/ws": "^8.5.11",
+    "nodemon": "^3.1.4",
+    "typescript": "^5.4.5"
+  }
+}

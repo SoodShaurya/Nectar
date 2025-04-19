@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "CommonJS",
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true, // Important for Mineflayer/plugins which might have type issues
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "sourceMap": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"],
+  "references": [
+    { "path": "../shared-types" },
+    // Assuming mineflayer-core, pathfinder, combat don't need explicit building via tsc here
+    // as they might be JS or have their own build steps. If they are TS and need building
+    // in sequence, add references:
+    // { "path": "../mineflayer-core" },
+    // { "path": "../pathfinder" },
+    // { "path": "../combat" }
+  ]
+}
