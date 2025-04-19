@@ -238,7 +238,9 @@ function initializeBot() {
     // Initialize core modules here, passing the bot instance and reporting functions
     perceptionModule.initialize(bot, reportEvent);
     navigationModule.initialize(bot, reportEvent);
-    // ... initialize other modules
+    combatModule.initialize(bot, reportEvent);
+    mineModule.initialize(bot, reportEvent);
+    // ... initialize other modules (Inventory, Crafting, Explore)
 }
 
 // --- Command Validation Layer ---
@@ -291,17 +293,23 @@ class TaskExecutionManager {
             // --- Delegate to Core Modules ---
             switch (type) {
                 case 'NavigateTo':
+                    // Ensure details match NavigateToDetails if using stricter types later
                     success = await navigationModule.navigateTo(details.targetCoords);
                     break;
                 case 'Gather':
-                    // success = await mineModule.gather(details.resource, details.quantity, details.targetAreaCoords);
-                    console.log("Gather task execution not implemented yet."); success = false; failureReason = "Not Implemented";
+                    // Ensure details match GatherDetails
+                    success = await mineModule.gather(details.resource, details.quantity, details.targetAreaCoords);
                     break;
                 case 'Attack':
-                     // success = await combatModule.attack(details.targetEntityId);
-                     console.log("Attack task execution not implemented yet."); success = false; failureReason = "Not Implemented";
+                     // Ensure details match AttackDetails
+                     success = await combatModule.attack(details.targetEntityId);
                     break;
+                case 'Guard':
+                     // Ensure details match GuardDetails
+                     success = await combatModule.guard(details.target, details.radius);
+                     break;
                 // Add cases for all other TaskTypes, calling the appropriate module function
+                // e.g., Craft, Smelt, PlaceBlock, Build, Follow, Transport, ManageContainer, Explore
                 default:
                     console.warn(`Task type ${type} not implemented in TEM.`);
                     failureReason = "Not Implemented";
@@ -392,11 +400,14 @@ class PerceptionModule {
     }
 
     scanEnvironment() {
-        if (!this.bot || !this.reportFunc || !this.bot.entity) return;
+        // Assign to local constants after null checks to satisfy TS strict null checks
+        const bot = this.bot;
+        const report = this.reportFunc;
+        if (!bot || !report || !bot.entity) return;
 
         // console.log("Perception: Scanning environment..."); // Can be noisy
 
-        const mcData = require('minecraft-data')(this.bot.version); // Load mcData here
+        const mcData = require('minecraft-data')(bot.version); // Use local bot constant
         if (!mcData) {
             console.error("Perception Error: Failed to load minecraft-data");
             return;
@@ -412,7 +423,7 @@ class PerceptionModule {
             return;
         }
 
-        const center = this.bot.entity.position;
+        const center = bot.entity.position; // Use local bot constant
         const options = {
             matching: blockTypesToFind,
             maxDistance: PERCEPTION_RADIUS,
@@ -420,11 +431,11 @@ class PerceptionModule {
         };
 
         try {
-            const foundBlocks = this.bot.findBlocks(options);
+            const foundBlocks = bot.findBlocks(options); // Use local bot constant
             // console.log(`Perception: Found ${foundBlocks.length} potential blocks.`); // Debug log
 
             foundBlocks.forEach(blockPos => {
-                const block = this.bot?.blockAt(blockPos);
+                const block = bot.blockAt(blockPos); // Use local bot constant (already checked for null)
                 if (!block) return;
 
                 const blockKey = `${block.name}_${blockPos.x}_${blockPos.y}_${blockPos.z}`;
@@ -441,7 +452,7 @@ class PerceptionModule {
                 const location = { x: blockPos.x, y: blockPos.y, z: blockPos.z };
 
                 if (STRATEGIC_RESOURCES.includes(block.name)) {
-                    this.reportFunc({
+                    report({ // Use local report constant
                         eventType: 'foundResource',
                         details: {
                             resourceType: block.name,
@@ -451,7 +462,7 @@ class PerceptionModule {
                         // Destination is set automatically by reportEvent for this type
                     });
                 } else if (STRATEGIC_POIS.includes(block.name)) {
-                     this.reportFunc({
+                     report({ // Use local report constant
                         eventType: 'foundPOI',
                         details: {
                             poiType: block.name, // Use block name as POI type for simplicity
@@ -504,6 +515,19 @@ class CombatModule {
      }
 }
 const combatModule = new CombatModule();
+
+class MineModule {
+     initialize(botInstance: mineflayer.Bot, reportFunc: typeof reportEvent) {
+        console.log("Mine Module Initialized (Placeholder)");
+    }
+     async gather(resource: string, quantity: number, targetArea?: any): Promise<boolean> {
+         console.log(`Mining: Gathering ${quantity} of ${resource} ${targetArea ? `near ${JSON.stringify(targetArea)}` : ''} (Not Implemented)`);
+         // TODO: Implement logic using bot.findBlock, bot.dig, bot.collectBlock etc.
+         // TODO: Handle vein/clump identification if targetArea is not specific block coords
+         return false;
+     }
+}
+const mineModule = new MineModule();
 
 
 // --- Main Execution ---
