@@ -1,6 +1,12 @@
-import mineflayer from '@aetherius/mineflayer-core';
+import mineflayer, { Bot } from '@aetherius/mineflayer-core'; // Import Bot type
 import net from 'net';
-import { AgentEvent, AgentStatusSnapshot, TaskObject, WebSocketMessage, TaskType } from '@aetherius/shared-types';
+import { AgentEvent, AgentStatusSnapshot, TaskObject, WebSocketMessage, TaskType, Coordinates } from '@aetherius/shared-types';
+// Keep type/goal imports, but load plugins via require
+import { goals } from '@aetherius/pathfinder';
+const { GoalBlock } = goals;
+import { Item } from 'prismarine-item'; // Import Item type for inventory methods
+import { Recipe } from 'prismarine-recipe'; // Import Recipe type for crafting
+import { Block } from 'prismarine-block'; // Import Block type
 
 // --- Configuration ---
 const AGENT_ID = process.env.AGENT_ID || `agent-unknown-${Math.random().toString(36).substring(2, 8)}`;
@@ -146,9 +152,9 @@ function initializeBot() {
         // auth: 'microsoft', // Add auth if needed
         checkTimeoutInterval: 60 * 1000, // 60 seconds
         plugins: {
-            // Load custom plugins here if needed, e.g., pathfinder, combat
-            // pathfinder: require('@aetherius/pathfinder'), // Example
-            // combat: require('@aetherius/combat') // Example
+            // Load custom plugins using require to bypass potential type issues
+            pathfinder: require('@aetherius/pathfinder').createPlugin(),
+            combat: require('@aetherius/combat'), // Assuming default export is the plugin function
         }
     });
 
@@ -240,7 +246,9 @@ function initializeBot() {
     navigationModule.initialize(bot, reportEvent);
     combatModule.initialize(bot, reportEvent);
     mineModule.initialize(bot, reportEvent);
-    // ... initialize other modules (Inventory, Crafting, Explore)
+    inventoryModule.initialize(bot, reportEvent);
+    craftingModule.initialize(bot, reportEvent);
+    exploreModule.initialize(bot, reportEvent); // Initialize ExploreModule
 }
 
 // --- Command Validation Layer ---
@@ -308,8 +316,16 @@ class TaskExecutionManager {
                      // Ensure details match GuardDetails
                      success = await combatModule.guard(details.target, details.radius);
                      break;
+                case 'Craft':
+                     // Ensure details match CraftDetails
+                     success = await craftingModule.craftItem(details.item, details.quantity, details.recipe);
+                     break;
+                case 'Explore':
+                     // Ensure details match ExploreDetails
+                     success = await exploreModule.exploreArea(details.area);
+                     break;
                 // Add cases for all other TaskTypes, calling the appropriate module function
-                // e.g., Craft, Smelt, PlaceBlock, Build, Follow, Transport, ManageContainer, Explore
+                // e.g., Smelt, PlaceBlock, Build, Follow, Transport, ManageContainer
                 default:
                     console.warn(`Task type ${type} not implemented in TEM.`);
                     failureReason = "Not Implemented";
@@ -483,15 +499,114 @@ class PerceptionModule {
 const perceptionModule = new PerceptionModule();
 
 class NavigationModule {
-     initialize(botInstance: mineflayer.Bot, reportFunc: typeof reportEvent) {
-        console.log("Navigation Module Initialized (Placeholder)");
-        // TODO: Load pathfinder plugin if used
+    private bot: Bot | null = null;
+    private reportFunc: typeof reportEvent | null = null;
+    // No need to store defaultMovements instance
+
+     initialize(botInstance: Bot, reportFunc: typeof reportEvent) {
+        console.log("Navigation Module Initializing...");
+        this.bot = botInstance;
+        this.reportFunc = reportFunc;
+
+        // Ensure pathfinder plugin is loaded (should be done in initializeBot)
+        // Use type casting for pathfinder until interface augmentation is done
+        // Use type casting for pathfinder until interface augmentation is done
+        const pathfinderInstance = (this.bot as any)?.pathfinder; // Add optional chaining for safety
+        if (!pathfinderInstance) {
+            console.error("Pathfinder plugin not loaded on bot instance!");
+            return;
+        }
+
+        // Setup default movements (example, adjust as needed)
+        // The Movements class might need mcData, check its constructor if issues arise
+        const mcData = require('minecraft-data')(this.bot.version);
+        // Note: The pathfinder plugin likely creates its own internal Movements instance.
+        // We configure it here. If direct instantiation is needed, adjust import path.
+        // For configuration, create a plain object matching the expected structure
+        // For configuration, create a plain object matching the expected structure
+        const movementConfig = {
+             allowSprinting: true,
+             canDig: true
+             // Add other configuration properties expected by setMovements if needed
+        };
+        // Configure the instance created by the plugin
+        pathfinderInstance.setMovements(movementConfig);
+        console.log("Navigation Module Initialized.");
     }
-    async navigateTo(coords: any): Promise<boolean> {
-        console.log(`Navigation: Moving to ${JSON.stringify(coords)} (Not Implemented)`);
-        // TODO: Implement using pathfinder plugin
-        await new Promise(resolve => setTimeout(resolve, 1000)); // Simulate movement
-        return false; // Placeholder
+
+    async navigateTo(coords: Coordinates): Promise<boolean> {
+        const bot = this.bot; // Use local variable for type safety within async function
+        const pathfinderInstance = (bot as any)?.pathfinder; // Use type casting with optional chaining
+        if (!bot || !pathfinderInstance) {
+            console.error("Navigation Error: Bot or Pathfinder not initialized.");
+            return false;
+        }
+
+        console.log(`Navigation: Attempting to move to ${JSON.stringify(coords)}`);
+
+        // Define the goal (adjust x,y,z based on GoalBlock requirements - e.g., block below feet)
+        // Assuming GoalBlock targets the block *at* the coordinates.
+        const goal = new GoalBlock(coords.x, coords.y, coords.z);
+
+        return new Promise((resolve) => {
+            const onGoalReached = () => {
+                console.log(`Navigation: Goal reached at ${JSON.stringify(coords)}`);
+                cleanupListeners();
+                resolve(true);
+            };
+
+            const onPathError = (reason: string) => {
+                 console.error(`Navigation Error: Pathfinding failed - ${reason}`);
+                 cleanupListeners();
+                 resolve(false);
+            };
+
+             // It seems the pathfinder might emit 'path_update' with status 'noPath' or 'timeout'
+             // Or potentially a specific 'error' or 'abort' event. Adjust based on actual plugin behavior.
+            const onPathUpdate = (results: any) => {
+                if (results?.status === 'noPath' || results?.status === 'timeout') {
+                    console.error(`Navigation Error: Path update status - ${results.status}`);
+                    cleanupListeners();
+                    resolve(false);
+                }
+                 // console.log(`Path update: ${results?.status}`); // Optional debug log
+            };
+
+            // Declare with let to allow reassignment later for timeout clearing
+            // Declare with let to allow reassignment later for timeout clearing
+            let cleanupListeners = () => { // Ensure 'let' is used for reassignment
+                pathfinderInstance.removeListener('goal_reached', onGoalReached);
+                pathfinderInstance.removeListener('error', onPathError); // Assuming an 'error' event
+                pathfinderInstance.removeListener('path_update', onPathUpdate); // Assuming 'path_update' for errors
+                pathfinderInstance.removeListener('abort', onPathError); // Assuming an 'abort' event
+            };
+
+            // Attach listeners
+            pathfinderInstance.once('goal_reached', onGoalReached);
+            pathfinderInstance.once('error', onPathError); // Adjust event name if needed
+            pathfinderInstance.on('path_update', onPathUpdate); // Listen continuously for path errors
+            pathfinderInstance.once('abort', onPathError); // Adjust event name if needed
+
+
+            // Set the goal to start pathfinding
+            pathfinderInstance.setGoal(goal, true); // Dynamic path recalculation enabled
+
+             // Optional: Add a timeout for the entire navigation task
+             const navigationTimeout = setTimeout(() => {
+                 console.error(`Navigation Error: Task timed out after 60 seconds.`);
+                 pathfinderInstance.stop(); // Stop pathfinding
+                 cleanupListeners();
+                 resolve(false);
+             }, 60000); // 60 second timeout
+
+             // Clear timeout listener on cleanup
+             // Wrap cleanupListeners to include timeout clearing
+             const originalCleanup = cleanupListeners;
+             cleanupListeners = () => { // Reassign the 'let' declared variable
+                 clearTimeout(navigationTimeout);
+                 originalCleanup();
+             };
+        });
     }
     // Add navigateToGoalFollowEntity, navigateToGoalBlock etc.
 }
@@ -499,35 +614,406 @@ const navigationModule = new NavigationModule();
 
 // ... Add skeleton classes for Inventory, Crafting, Mine, Combat, Explore ...
 class CombatModule {
-     initialize(botInstance: mineflayer.Bot, reportFunc: typeof reportEvent) {
-        console.log("Combat Module Initialized (Placeholder)");
-        // TODO: Load combat plugin
+    private bot: Bot | null = null;
+    private reportFunc: typeof reportEvent | null = null;
+    private combatPlugin: any = null; // Store reference to plugin API (e.g., bot.swordpvp)
+
+     initialize(botInstance: Bot, reportFunc: typeof reportEvent) {
+        console.log("Combat Module Initializing...");
+        this.bot = botInstance;
+        this.reportFunc = reportFunc;
+
+        // Access the plugin loaded onto the bot instance
+        // Assuming the plugin adds 'swordpvp' and/or 'bowpvp' based on its README
+        // Use type casting as TypeScript won't know about dynamically added plugin properties
+        this.combatPlugin = (this.bot as any)?.swordpvp; // Prioritize sword for now
+
+        if (!this.combatPlugin) {
+             console.warn("Combat plugin (swordpvp) not found on bot instance! Trying bowpvp...");
+             // Attempt to access bowpvp as fallback?
+             this.combatPlugin = (this.bot as any)?.bowpvp;
+             if (!this.combatPlugin) {
+                 console.error("Combat plugin (swordpvp/bowpvp) not found! Combat module disabled.");
+                 return; // Disable module if plugin isn't loaded
+             } else {
+                 console.log("Using bowpvp for combat.");
+             }
+        } else {
+             console.log("Using swordpvp for combat.");
+        }
+        console.log("Combat Module Initialized.");
+        // TODO: Configure combat plugin options if needed (e.g., bot.swordpvp.options...)
     }
+
      async attack(targetEntityId: string): Promise<boolean> {
-         console.log(`Combat: Attacking ${targetEntityId} (Not Implemented)`);
-         // TODO: Implement using combat plugin
-         return false;
+         const bot = this.bot;
+         const combatApi = this.combatPlugin;
+         if (!bot || !combatApi) {
+             console.error("Combat Error: Bot or Combat Plugin not initialized.");
+             return false;
+         }
+
+         console.log(`Combat: Attempting to attack entity ${targetEntityId}`);
+
+         // Find the entity object by its ID (or potentially username)
+         // Note: bot.entities might store entities by numerical ID or UUID depending on version/server
+         const targetEntity = Object.values(bot.entities).find(entity =>
+             entity.uuid === targetEntityId || // Check UUID
+             (entity.id !== undefined && entity.id.toString() === targetEntityId) || // Check numerical ID (convert both to string for comparison)
+             entity.username === targetEntityId // Check username
+         );
+
+
+         if (!targetEntity) {
+             console.error(`Combat Error: Target entity '${targetEntityId}' not found.`);
+             // Report failure back?
+             // this.reportFunc?.({ eventType: 'taskFailed', details: { reason: `Target entity ${targetEntityId} not found` } });
+             return false;
+         }
+
+         try {
+             // Call the plugin's attack method
+             // Assuming the API is bot.swordpvp.attack(entity) or similar
+             if (typeof combatApi.attack !== 'function') {
+                 console.error(`Combat Error: Combat plugin does not have an 'attack' function.`);
+                 return false;
+             }
+             combatApi.attack(targetEntity);
+             // The combat plugin likely handles the attack loop internally.
+             // We might need listeners for completion/failure if the plugin provides them.
+             console.log(`Combat: Attack command issued for ${targetEntityId}.`);
+             // For now, assume command issuance is success. Need event handling for true success.
+             // Consider reporting taskProgress here?
+             return true;
+         } catch (error: any) {
+             console.error(`Combat Error: Failed to execute attack command for ${targetEntityId}:`, error);
+             return false;
+         }
      }
-     async guard(target: any, radius: number): Promise<boolean> {
-         console.log(`Combat: Guarding ${JSON.stringify(target)} within ${radius}m (Not Implemented)`);
-         // TODO: Implement using combat plugin
-         return false;
+
+     async guard(target: {entityId: string} | {location: Coordinates}, radius: number): Promise<boolean> {
+         const bot = this.bot;
+         const combatApi = this.combatPlugin;
+          if (!bot || !combatApi) {
+             console.error("Combat Error: Bot or Combat Plugin not initialized.");
+             return false;
+         }
+
+         // The @aetherius/combat plugin's guard function might differ.
+         // Placeholder logic assuming it takes a position and radius.
+         // We need to resolve the entityId to a position if provided.
+         let guardPosition: Coordinates | null = null;
+
+         if ('location' in target) {
+             guardPosition = target.location;
+         } else if ('entityId' in target) {
+             const targetEntity = Object.values(bot.entities).find(entity =>
+                 entity.uuid === target.entityId ||
+                 (entity.id !== undefined && entity.id.toString() === target.entityId) ||
+                 entity.username === target.entityId
+             );
+             if (targetEntity) {
+                 guardPosition = targetEntity.position;
+             } else {
+                  console.error(`Combat Error: Guard target entity ${target.entityId} not found.`);
+                  return false;
+             }
+         }
+
+         if (!guardPosition) {
+              console.error(`Combat Error: Could not determine guard position.`);
+              return false;
+         }
+
+         console.log(`Combat: Attempting to guard position ${JSON.stringify(guardPosition)} within ${radius}m`);
+
+         try {
+             // Assuming an API like bot.swordpvp.guard(position, radius)
+             // The actual API might differ, consult the plugin docs/code.
+             if (typeof combatApi.guard === 'function') {
+                 combatApi.guard(guardPosition, radius); // Call the guard function
+                 console.log(`Combat: Guard command issued.`);
+                 // Assume command issuance is success. Need event handling for confirmation/failure.
+                 return true;
+             } else {
+                  console.error(`Combat Error: Plugin does not support guard function.`);
+                  return false;
+             }
+         } catch (error: any) {
+             console.error(`Combat Error: Failed to execute guard command:`, error);
+             return false;
+         }
      }
 }
 const combatModule = new CombatModule();
 
 class MineModule {
-     initialize(botInstance: mineflayer.Bot, reportFunc: typeof reportEvent) {
-        console.log("Mine Module Initialized (Placeholder)");
+    private bot: Bot | null = null;
+    private reportFunc: typeof reportEvent | null = null;
+    private mcData: any = null;
+
+     initialize(botInstance: Bot, reportFunc: typeof reportEvent) {
+        console.log("Mine Module Initializing...");
+        this.bot = botInstance;
+        this.reportFunc = reportFunc;
+        this.mcData = require('minecraft-data')(botInstance.version);
+        console.log("Mine Module Initialized.");
     }
-     async gather(resource: string, quantity: number, targetArea?: any): Promise<boolean> {
-         console.log(`Mining: Gathering ${quantity} of ${resource} ${targetArea ? `near ${JSON.stringify(targetArea)}` : ''} (Not Implemented)`);
-         // TODO: Implement logic using bot.findBlock, bot.dig, bot.collectBlock etc.
-         // TODO: Handle vein/clump identification if targetArea is not specific block coords
-         return false;
+
+     async gather(resource: string, quantity: number, targetArea?: Coordinates): Promise<boolean> {
+         const bot = this.bot;
+         if (!bot || !this.mcData) {
+             console.error("Mining Error: Bot or mcData not initialized.");
+             return false;
+         }
+         console.log(`Mining: Attempting to gather ${quantity} of ${resource} ${targetArea ? `near ${JSON.stringify(targetArea)}` : ''}`);
+
+         const item = this.mcData.itemsByName[resource] || this.mcData.blocksByName[resource];
+         if (!item) {
+             console.error(`Mining Error: Unknown resource type ${resource}`);
+             return false;
+         }
+
+         let gatheredCount = 0;
+         while (gatheredCount < quantity) {
+             // Find the nearest block of the target resource type
+             // TODO: Incorporate targetArea if provided
+             const block = bot.findBlock({
+                 matching: item.id,
+                 maxDistance: 64, // Search radius
+                 // Use point: targetArea ? new Vec3(targetArea.x, targetArea.y, targetArea.z) : bot.entity.position // Requires Vec3 import
+             });
+
+             if (!block) {
+                 console.log(`Mining: No more ${resource} found nearby.`);
+                 // Report partial success or failure based on gatheredCount vs quantity
+                 return gatheredCount > 0;
+             }
+
+             console.log(`Mining: Found ${resource} at ${block.position}`);
+
+             // Navigate to the block (use NavigationModule)
+             const reached = await navigationModule.navigateTo(block.position);
+             if (!reached) {
+                 console.error(`Mining Error: Failed to navigate to ${resource} at ${block.position}`);
+                 // Consider blacklisting this block or area?
+                 return false; // Or report partial success if some were gathered
+             }
+
+             // Ensure the bot has the right tool equipped (basic check)
+             // TODO: Implement proper tool selection logic
+             const pathfinderInstance = (bot as any)?.pathfinder; // Use type casting
+             const bestTool = pathfinderInstance?.bestHarvestTool(block); // Use pathfinder's tool check if available
+             if (bestTool) {
+                 await inventoryModule.equip(bestTool.name, 'hand'); // Use InventoryModule to equip
+             } else if (block.material && !bot.heldItem?.name.includes('pickaxe')) { // Simple fallback
+                 console.warn(`Mining Warning: No suitable tool found for ${resource}, attempting with hand/current item.`);
+             }
+
+             // Dig the block
+             try {
+                 console.log(`Mining: Digging ${resource} at ${block.position}`);
+                 await bot.dig(block);
+                 gatheredCount++; // Increment count - assumes 1 drop per block for simplicity
+                 console.log(`Mining: Gathered ${gatheredCount}/${quantity} of ${resource}`);
+                 // Mineflayer's dig usually handles collection, but bot.collectBlock could be used if needed
+             } catch (err: any) {
+                 console.error(`Mining Error: Failed to dig ${resource} at ${block.position}:`, err.message);
+                 return false; // Failed to dig this block
+             }
+         }
+
+         console.log(`Mining: Successfully gathered ${gatheredCount}/${quantity} of ${resource}.`);
+         return true;
      }
 }
 const mineModule = new MineModule();
+
+class InventoryModule {
+    private bot: Bot | null = null;
+    private reportFunc: typeof reportEvent | null = null;
+    private mcData: any = null; // To store minecraft-data
+
+    initialize(botInstance: Bot, reportFunc: typeof reportEvent) {
+        console.log("Inventory Module Initializing...");
+        this.bot = botInstance;
+        this.reportFunc = reportFunc;
+        this.mcData = require('minecraft-data')(botInstance.version);
+        console.log("Inventory Module Initialized.");
+    }
+
+    async equip(itemType: string, destination: 'hand' | 'head' | 'torso' | 'legs' | 'feet' | 'off-hand'): Promise<boolean> {
+        const bot = this.bot;
+        if (!bot || !this.mcData) {
+             console.error("Inventory Error: Bot or mcData not initialized.");
+             return false;
+        }
+        console.log(`Inventory: Attempting to equip ${itemType} to ${destination}`);
+        try {
+            const item = this.findItem(itemType); // Find item first
+            if (!item) {
+                console.error(`Inventory Error: Item ${itemType} not found to equip.`);
+                return false;
+            }
+            await bot.equip(item, destination);
+            console.log(`Inventory: Successfully equipped ${itemType} to ${destination}.`);
+            return true;
+        } catch (error: any) {
+            console.error(`Inventory Error: Failed to equip ${itemType}:`, error);
+            return false;
+        }
+    }
+
+    async toss(itemType: string, quantity: number | null): Promise<boolean> {
+         const bot = this.bot;
+         if (!bot || !this.mcData) {
+             console.error("Inventory Error: Bot or mcData not initialized.");
+             return false;
+         }
+         console.log(`Inventory: Attempting to toss ${quantity ?? 'all'} of ${itemType}`);
+         try {
+             const item = this.findItem(itemType); // Find item first
+             if (!item) {
+                 console.error(`Inventory Error: Item ${itemType} not found to toss.`);
+                 return false;
+             }
+             if (quantity === null || quantity >= item.count) {
+                 // Toss the whole stack
+                 await bot.tossStack(item);
+                 console.log(`Inventory: Tossed entire stack of ${itemType}.`);
+             } else {
+                 // Toss specific quantity
+                 await bot.toss(item.type, null, quantity); // metadata is null for now
+                 console.log(`Inventory: Tossed ${quantity} of ${itemType}.`);
+             }
+             return true;
+         } catch (error: any) {
+             console.error(`Inventory Error: Failed to toss ${itemType}:`, error);
+             return false;
+         }
+    }
+
+    findItem(itemType: string): Item | null {
+        const bot = this.bot;
+        if (!bot || !bot.inventory || !this.mcData) {
+             console.error("Inventory Error: Bot, inventory, or mcData not initialized for findItem.");
+             return null;
+        }
+        // Find item by name using minecraft-data to get the ID
+        const itemData = this.mcData.itemsByName[itemType];
+        if (!itemData) {
+            console.warn(`Inventory Warning: Unknown item name '${itemType}' for findItem.`);
+            return null;
+        }
+        // Use findInventoryItem with the correct item ID and pass false for useByName
+        return bot.inventory.findInventoryItem(itemData.id, null, false);
+    }
+
+     itemCount(itemType: string): number {
+         const bot = this.bot;
+          if (!bot || !bot.inventory || !this.mcData) {
+             console.error("Inventory Error: Bot, inventory, or mcData not initialized for itemCount.");
+             return 0;
+         }
+         // Find item ID from name
+         const itemData = this.mcData.itemsByName[itemType];
+         if (!itemData) {
+             console.warn(`Inventory Warning: Unknown item name '${itemType}' for itemCount.`);
+             return 0;
+         }
+         // Use bot.inventory.count with item ID
+         return bot.inventory.count(itemData.id, null); // metadata is null for now
+     }
+}
+const inventoryModule = new InventoryModule(); // Instantiate
+
+class CraftingModule {
+    private bot: Bot | null = null;
+    private reportFunc: typeof reportEvent | null = null;
+    private mcData: any = null;
+
+    initialize(botInstance: Bot, reportFunc: typeof reportEvent) {
+        console.log("Crafting Module Initializing...");
+        this.bot = botInstance;
+        this.reportFunc = reportFunc;
+        this.mcData = require('minecraft-data')(botInstance.version);
+        console.log("Crafting Module Initialized.");
+    }
+
+    async craftItem(itemType: string, quantity: number = 1, recipe?: Recipe): Promise<boolean> {
+        const bot = this.bot;
+        if (!bot || !this.mcData) {
+            console.error("Crafting Error: Bot or mcData not initialized.");
+            return false;
+        }
+        console.log(`Crafting: Attempting to craft ${quantity} of ${itemType}`);
+
+        try {
+            const item = this.mcData.itemsByName[itemType];
+            if (!item) {
+                console.error(`Crafting Error: Unknown item type ${itemType}`);
+                return false;
+            }
+
+            const recipes = bot.recipesFor(item.id, null, 1, null); // Find recipes for the item
+            if (!recipes || recipes.length === 0) {
+                 console.error(`Crafting Error: No recipe found for ${itemType}`);
+                 return false;
+            }
+
+            // Use provided recipe or the first available one
+            const recipeToUse = recipe || recipes[0];
+
+            // Check if crafting table is needed and available nearby
+            let craftingTable: Block | null = null; // Use Block type
+            if (recipeToUse.requiresTable) {
+                craftingTable = bot.findBlock({
+                    matching: this.mcData.blocksByName.crafting_table.id,
+                    maxDistance: 4, // Look within 4 blocks
+                });
+                if (!craftingTable) {
+                    console.warn(`Crafting Warning: Crafting table required for ${itemType} but none found nearby.`);
+                    // TODO: Add logic to place a crafting table if available in inventory
+                    return false; // Fail for now if table needed but not found
+                }
+            }
+
+            console.log(`Crafting: Using recipe for ${itemType}. Table needed: ${recipeToUse.requiresTable}`);
+            await bot.craft(recipeToUse, quantity, craftingTable ?? undefined); // Convert null to undefined
+            console.log(`Crafting: Successfully crafted ${quantity} of ${itemType}.`);
+            // TODO: Add logic to reclaim crafting table if placed by the bot
+            return true;
+
+        } catch (error: any) {
+            console.error(`Crafting Error: Failed to craft ${itemType}:`, error);
+            return false;
+        }
+    }
+}
+const craftingModule = new CraftingModule(); // Instantiate
+
+class ExploreModule { // Added Skeleton
+    private bot: Bot | null = null;
+    private reportFunc: typeof reportEvent | null = null;
+
+    initialize(botInstance: Bot, reportFunc: typeof reportEvent) {
+        console.log("Explore Module Initializing...");
+        this.bot = botInstance;
+        this.reportFunc = reportFunc;
+        console.log("Explore Module Initialized.");
+    }
+
+    async exploreArea(area?: { center: Coordinates; radius: number }): Promise<boolean> {
+        console.log(`Exploring ${area ? `area around ${JSON.stringify(area.center)} with radius ${area.radius}` : 'current vicinity'} (Not Implemented)`);
+        // TODO: Implement exploration logic (e.g., random walk, systematic scan, follow terrain)
+        // Could potentially use NavigationModule for movement.
+        // Should likely run for a duration or until a specific condition is met.
+        await new Promise(resolve => setTimeout(resolve, 5000)); // Simulate exploring for 5 seconds
+        console.log("Exploration step finished (Placeholder).");
+        return true; // Placeholder success
+    }
+}
+const exploreModule = new ExploreModule(); // Instantiate
 
 
 // --- Main Execution ---

@@ -1025,7 +1025,6 @@ export class StraightUpExecutor extends MovementExecutor {
         await this.performInteraction(breakH)
       }
     }
-    
 
     if (thisMove.toPlace.length > 1) throw new CancelError('StraightUp: toPlace.length > 1')
     // console.log(thisMove.toPlace.length)

@@ -23,7 +23,10 @@
     "@aetherius/mineflayer-core": "workspace:*", 
     "@aetherius/pathfinder": "workspace:*", 
     "@aetherius/combat": "workspace:*",
-    "ws": "^8.18.0" 
+    "ws": "^8.18.0",
+    "prismarine-item": "^1.15.0",
+    "prismarine-recipe": "^1.3.0",
+    "prismarine-block": "^1.17.0"
   },
   "devDependencies": {
     "@types/node": "^20.14.10",

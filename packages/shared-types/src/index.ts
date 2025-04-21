@@ -142,7 +142,9 @@ export type AgentEventType =
   | "tookDamage"
   | "inventoryUpdate" // More generic than inventoryFull
   | "statusUpdate" // Generic status change
-  | "taskRejected"; // If agent cannot perform task
+  | "taskRejected" // If agent cannot perform task
+  | "agentLostConnection" // Added for Squad Leader error handling
+  | "commandSendFailed"; // Added for Squad Leader error handling
 
 export type AgentEventDetails =
   | TaskCompleteDetails
@@ -309,6 +311,8 @@ export interface AgentInfo {
     currentTaskType?: TaskType;
     currentSquadId?: string;
     lastKnownLocation?: Coordinates;
+    tags?: string[]; // Optional tags for agent capabilities/roles
+    keyInventorySummary?: { [itemName: string]: number }; // Optional summary of key items
 }
 
 export interface SquadInfo {
