@@ -1,0 +1,21 @@
+{
+  "name": "aetherius-dragon-ai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Aetherius: Autonomous Minecraft Agent Swarm",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "pnpm -r --filter=\"./packages/**\" run build"
+  },
+  "keywords": [
+    "minecraft",
+    "mineflayer",
+    "ai",
+    "llm",
+    "gemini",
+    "swarm",
+    "agent"
+  ],
+  "author": "",
+  "license": "MIT"
+}

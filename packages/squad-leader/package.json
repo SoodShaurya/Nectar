@@ -1,0 +1,31 @@
+{
+  "name": "@aetherius/squad-leader",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Aetherius Squad Leader Instance Logic - Tactical Commander",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js", 
+    "watch": "tsc -w"
+  },
+  "keywords": [
+    "aetherius",
+    "squad-leader",
+    "gemini",
+    "minecraft",
+    "tactics"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@aetherius/shared-types": "workspace:*",
+    "@google/generative-ai": "^0.15.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "@types/ws": "^8.5.11",
+    "typescript": "^5.4.5"
+  }
+}
