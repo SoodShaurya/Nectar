@@ -8,8 +8,8 @@ import { WebSocketMessage, AgentStatusSnapshot, AgentEvent, WorldStateReportPayl
 // --- Configuration (Replace with actual config loading) ---
 const WS_PORT = parseInt(process.env.BSM_WS_PORT || '4000', 10);
 const LOCAL_AGENT_PORT = parseInt(process.env.BSM_AGENT_PORT || '4001', 10);
-const ORCHESTRATOR_ADDRESS = process.env.ORCHESTRATOR_ADDRESS || 'ws://localhost:????'; // TODO: Get Orchestrator WS port
-const WORLD_STATE_API_ADDRESS = process.env.WORLD_STATE_API_ADDRESS || 'http://localhost:3000'; // Assuming default WSS port
+const ORCHESTRATOR_ADDRESS = process.env.ORCHESTRATOR_ADDRESS || 'ws://localhost:5001';
+const WORLD_STATE_API_ADDRESS = process.env.WORLD_STATE_API_ADDRESS || 'http://localhost:3000';
 const BSM_ID = process.env.BSM_ID || `bsm-${Math.random().toString(36).substring(2, 8)}`;
 const AGENT_SCRIPT_PATH = process.env.AGENT_SCRIPT_PATH || '../bot-agent/dist/index.js'; // Relative path to compiled agent script
 
