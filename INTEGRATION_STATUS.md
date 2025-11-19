@@ -124,16 +124,72 @@ shutdown.register(async () => {
 ```
 
 ### Squad Leader
-**Needs:**
-- [ ] Winston logger (replace ~54 console.log statements)
-- [ ] Config validation with squadLeaderConfigSchema
-- [ ] Graceful shutdown
-- [ ] Circuit breaker for Gemini API
-- [ ] LLM cache for tactical planning
-- [ ] Rate limiting (1500 calls/minute for Gemini Flash)
-- [ ] Metrics collection
+- ✅ Winston logger integrated (replaced all console.log/warn/error)
+- ✅ Config validation with squadLeaderConfigSchema
+- ✅ Graceful shutdown handlers
+- ✅ Circuit breaker for Gemini Flash API
+- ✅ LLM cache for tactical planning (3 min TTL)
+- ✅ Rate limiting (1500 calls/minute for Gemini Flash)
+- ✅ Metrics collection (planning cycles, LLM calls, commands, missions)
 
-**Similar pattern to Orchestrator but for tactical planning**
+**Key Integration Points:**
+```typescript
+// At top of file
+import {
+  createLogger,
+  validateConfig,
+  squadLeaderConfigSchema,
+  createGracefulShutdown,
+  metrics,
+  CircuitBreaker,
+  LLMCache,
+  RateLimiter
+} from '@aetherius/shared-types';
+
+const logger = createLogger('squad-leader');
+const config = validateConfig(squadLeaderConfigSchema, 'Squad Leader');
+
+// Circuit breaker for Gemini Flash
+const geminiCircuitBreaker = new CircuitBreaker('gemini-flash-api', {
+  failureThreshold: 5,
+  resetTimeout: 60000,
+  onStateChange: (state) => logger.warn('Gemini Flash circuit breaker state changed', { state })
+});
+
+// LLM cache (3 min TTL - faster tactical decisions)
+const llmCache = new LLMCache({ ttl: 3 * 60 * 1000 });
+
+// Rate limiter (1500 calls/minute for Gemini Flash)
+const geminiRateLimiter = new RateLimiter({
+  maxCalls: 1500,
+  windowMs: 60000
+});
+
+// In runTacticalPlanning function
+async function runTacticalPlanning(triggeringEvent?: any) {
+  // Check cache first
+  const cacheKey = llmCache.getCacheKey(userPrompt, context);
+  const cached = llmCache.get(cacheKey);
+  if (cached) {
+    logger.info('Using cached LLM tactical response');
+    return cached;
+  }
+
+  // Rate limit
+  await geminiRateLimiter.waitIfNeeded();
+
+  // Circuit breaker
+  const response = await geminiCircuitBreaker.execute(async () => {
+    return await metrics.measureAsync('llm_tactical_call', async () => {
+      return await tacticalChatSession!.sendMessage(userPrompt);
+    });
+  });
+
+  // Cache response
+  llmCache.set(cacheKey, response);
+  return response;
+}
+```
 
 ### Bot Agent
 **Needs:**
@@ -269,7 +325,7 @@ const result = await apiCall();
 | World State | 0 | 355 | ✅ 100% |
 | Orchestrator | 0 | 983 | ✅ 100% |
 | BSM | 0 | 627 | ✅ 100% |
-| Squad Leader | 54 | 645 | ⏳ 0% |
+| Squad Leader | 0 | 708 | ✅ 100% |
 | Bot Agent | 116 | 1055 | ⏳ 0% |
 
 ## 🚀 Quick Integration Script
@@ -326,25 +382,25 @@ curl http://localhost:3000/metrics
 
 ## 📝 Next Steps
 
-1. Integrate Orchestrator Service (most critical)
-2. Integrate BSM
-3. Integrate Squad Leader
-4. Integrate Bot Agent
+1. ✅ ~~Integrate Orchestrator Service~~ (COMPLETED)
+2. ✅ ~~Integrate BSM~~ (COMPLETED)
+3. ✅ ~~Integrate Squad Leader~~ (COMPLETED)
+4. Integrate Bot Agent (final service)
 5. Test end-to-end
 6. Commit all changes
 
 ---
 
-**Status**: 3/5 services fully integrated (60%)
+**Status**: 4/5 services fully integrated (80%)
 **Target**: 5/5 services integrated (100%)
 
 ## 📈 Integration Progress
 
-### ✅ Completed (3/5)
+### ✅ Completed (4/5)
 1. **World State Service** - Full integration with health checks, metrics, graceful shutdown
 2. **Orchestrator Service** - Full integration with circuit breaker, LLM cache, rate limiting, health checks, metrics
 3. **Bot Server Manager** - Full integration with health checks, metrics, graceful shutdown, WebSocket/TCP routing
+4. **Squad Leader** - Full integration with circuit breaker, LLM cache, rate limiting, metrics, graceful shutdown
 
-### 🚧 Remaining (2/5)
-4. **Squad Leader** - Next priority (circuit breaker + LLM cache needed)
-5. **Bot Agent** - Lower priority (logger + config sufficient)
+### 🚧 Remaining (1/5)
+5. **Bot Agent** - Final service (logger + config sufficient)
