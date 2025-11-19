@@ -85,12 +85,12 @@ async function runStrategicPlanning() {
 ```
 
 ### Bot Server Manager
-**Needs:**
-- [ ] Winston logger (replace ~64 console.log statements)
-- [ ] Config validation with bsmConfigSchema
-- [ ] Graceful shutdown for agents and WebSocket
-- [ ] Health check endpoint
-- [ ] Metrics collection
+- ✅ Winston logger integrated (replaced all console.log)
+- ✅ Config validation with bsmConfigSchema
+- ✅ Graceful shutdown for WebSocket, TCP, HTTP, and agents
+- ✅ Health check endpoint (`GET /health` on port 4002)
+- ✅ Metrics endpoint (`GET /metrics` on port 4002)
+- ✅ Metrics collection (agents, connections, message forwarding, World State reports)
 
 **Key Integration Points:**
 ```typescript
@@ -268,7 +268,7 @@ const result = await apiCall();
 |---------|------------------|-------|---------------|
 | World State | 0 | 355 | ✅ 100% |
 | Orchestrator | 0 | 983 | ✅ 100% |
-| BSM | 64 | 490 | ⏳ 0% |
+| BSM | 0 | 627 | ✅ 100% |
 | Squad Leader | 54 | 645 | ⏳ 0% |
 | Bot Agent | 116 | 1055 | ⏳ 0% |
 
@@ -335,16 +335,16 @@ curl http://localhost:3000/metrics
 
 ---
 
-**Status**: 2/5 services fully integrated (40%)
+**Status**: 3/5 services fully integrated (60%)
 **Target**: 5/5 services integrated (100%)
 
 ## 📈 Integration Progress
 
-### ✅ Completed (2/5)
+### ✅ Completed (3/5)
 1. **World State Service** - Full integration with health checks, metrics, graceful shutdown
 2. **Orchestrator Service** - Full integration with circuit breaker, LLM cache, rate limiting, health checks, metrics
+3. **Bot Server Manager** - Full integration with health checks, metrics, graceful shutdown, WebSocket/TCP routing
 
-### 🚧 Remaining (3/5)
-3. **Bot Server Manager** - Next priority
-4. **Squad Leader** - Medium priority
-5. **Bot Agent** - Lower priority
+### 🚧 Remaining (2/5)
+4. **Squad Leader** - Next priority (circuit breaker + LLM cache needed)
+5. **Bot Agent** - Lower priority (logger + config sufficient)
