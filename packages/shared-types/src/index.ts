@@ -329,3 +329,14 @@ export interface AgentCommandObject {
     taskId: string; // Unique ID for this specific command instance
     task: TaskObject;
 }
+// --- Utility Exports ---
+export * from './logger';
+export * from './config';
+export * from './errors';
+export * from './retry';
+export * from './circuit-breaker';
+export * from './rate-limiter';
+export * from './metrics';
+export * from './shutdown';
+export * from './llm-cache';
+export * from './health';

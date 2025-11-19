@@ -1,6 +1,18 @@
 import mineflayer, { Bot } from '@aetherius/mineflayer-core'; // Import Bot type
 import net from 'net';
-import { AgentEvent, AgentStatusSnapshot, TaskObject, WebSocketMessage, TaskType, Coordinates } from '@aetherius/shared-types';
+import {
+  AgentEvent,
+  AgentStatusSnapshot,
+  TaskObject,
+  WebSocketMessage,
+  TaskType,
+  Coordinates,
+  createLogger,
+  validateConfig,
+  agentConfigSchema,
+  createGracefulShutdown,
+  metrics
+} from '@aetherius/shared-types';
 // Keep type/goal imports, but load plugins via require
 import { goals } from '@aetherius/pathfinder';
 const { GoalBlock } = goals;
@@ -8,17 +20,25 @@ import { Item } from 'prismarine-item'; // Import Item type for inventory method
 import { Recipe } from 'prismarine-recipe'; // Import Recipe type for crafting
 import { Block } from 'prismarine-block'; // Import Block type
 
-// --- Configuration ---
-const AGENT_ID = process.env.AGENT_ID || `agent-unknown-${Math.random().toString(36).substring(2, 8)}`;
-const BSM_TCP_PORT = parseInt(process.env.BSM_TCP_PORT || '4001', 10);
-const BSM_HOST = process.env.BSM_HOST || '127.0.0.1';
-const MINECRAFT_HOST = process.env.MC_HOST || 'localhost';
-const MINECRAFT_PORT = parseInt(process.env.MC_PORT || '25565', 10);
-const MINECRAFT_VERSION = process.env.MC_VERSION || '1.20.1'; // Or fetch dynamically
+// --- Initialize Logger ---
+const logger = createLogger('bot-agent');
 
-console.log(`--- Bot Agent (${AGENT_ID}) ---`);
-console.log(`Connecting to BSM at ${BSM_HOST}:${BSM_TCP_PORT}`);
-console.log(`Connecting to Minecraft at ${MINECRAFT_HOST}:${MINECRAFT_PORT} (Version: ${MINECRAFT_VERSION})`);
+// --- Validate Configuration ---
+const config = validateConfig(agentConfigSchema, 'Bot Agent');
+
+const AGENT_ID = config.AGENT_ID || `agent-unknown-${Math.random().toString(36).substring(2, 8)}`;
+const BSM_TCP_PORT = config.BSM_TCP_PORT;
+const BSM_HOST = config.BSM_HOST;
+const MINECRAFT_HOST = config.MC_HOST;
+const MINECRAFT_PORT = config.MC_PORT;
+const MINECRAFT_VERSION = config.MC_VERSION;
+
+logger.info('Starting Bot Agent', {
+  agentId: AGENT_ID,
+  bsmAddress: `${BSM_HOST}:${BSM_TCP_PORT}`,
+  mcAddress: `${MINECRAFT_HOST}:${MINECRAFT_PORT}`,
+  mcVersion: MINECRAFT_VERSION
+});
 
 // --- BSM Communication (Control Unit) ---
 let bsmSocket: net.Socket | null = null;
@@ -30,12 +50,13 @@ const KEY_ITEM_CATEGORIES = ['tool', 'weapon', 'armor', 'food', 'resource']; // 
 
 function connectToBSM() {
     if (bsmSocket && !bsmSocket.destroyed) {
-        console.log('Already connected or connecting to BSM.');
+        logger.info('Already connected or connecting to BSM.');
         return;
     }
 
     bsmSocket = net.createConnection({ host: BSM_HOST, port: BSM_TCP_PORT }, () => {
-        console.log('Connected to BSM TCP server.');
+        logger.info('Connected to BSM TCP server.');
+        metrics.increment('bsm_connections');
         // Register with BSM
         const registrationMessage = { type: 'register', payload: { agentId: AGENT_ID } };
         sendToBSM(registrationMessage);
@@ -52,40 +73,42 @@ function connectToBSM() {
 
             try {
                 const message = JSON.parse(messageString);
-                console.log(`Received message from BSM: ${message.type}`);
+                logger.info(`Received message from BSM: ${message.type}`);
 
                 if (message.type === 'command' && message.payload) {
                     handleIncomingCommand(message.payload.taskId, message.payload.task);
                 } else {
-                    console.warn(`Received unknown message type from BSM: ${message.type}`);
+                    logger.warn(`Received unknown message type from BSM: ${message.type}`);
                 }
             } catch (error) {
-                console.error('Failed to parse BSM message:', error, `\nRaw data part: ${messageString}`);
+                logger.error('Failed to parse BSM message:', error, `\nRaw data part: ${messageString}`);
             }
             boundary = messageBuffer.indexOf('\n'); // Check for next message in buffer
         }
     });
 
     bsmSocket.on('end', () => {
-        console.log('Disconnected from BSM TCP server.');
+        logger.info('Disconnected from BSM TCP server.');
+        metrics.increment('bsm_disconnections');
         isRegisteredWithBSM = false;
         bsmSocket = null;
         // Implement reconnection logic
-        console.log('Attempting to reconnect to BSM in 5 seconds...');
+        logger.info('Attempting to reconnect to BSM in 5 seconds...');
         setTimeout(connectToBSM, 5000);
     });
 
     bsmSocket.on('error', (err: Error) => {
-        console.error('BSM TCP connection error:', err.message);
+        logger.error('BSM TCP connection error:', err.message);
+        metrics.increment('bsm_connection_errors');
         isRegisteredWithBSM = false;
         bsmSocket?.destroy(); // Ensure socket is destroyed on error
         bsmSocket = null;
         // Implement reconnection logic
         if (!err.message.includes('ECONNREFUSED')) { // Avoid spamming logs if server is just down
-             console.log('Attempting to reconnect to BSM in 5 seconds...');
+             logger.info('Attempting to reconnect to BSM in 5 seconds...');
              setTimeout(connectToBSM, 5000);
         } else {
-             console.log('BSM connection refused. Will retry later.');
+             logger.info('BSM connection refused. Will retry later.');
              setTimeout(connectToBSM, 15000); // Longer delay if refused
         }
     });
@@ -98,11 +121,11 @@ function sendToBSM(message: any): boolean {
             bsmSocket.write(JSON.stringify(message) + '\n');
             return true;
         } catch (error) {
-            console.error('Failed to send message to BSM:', error);
+            logger.error('Failed to send message to BSM:', error);
             return false;
         }
     } else {
-        console.warn('Cannot send message: Not connected or registered with BSM.');
+        logger.warn('Cannot send message: Not connected or registered with BSM.');
         return false;
     }
 }
@@ -123,7 +146,9 @@ function reportEvent(event: Omit<AgentEvent, 'agentId' | 'timestamp' | 'destinat
     if (recentEventSummaries.length > MAX_RECENT_EVENTS) {
         recentEventSummaries.shift(); // Remove the oldest event
     }
-    console.log(`Reporting Event: ${fullEvent.eventType} to ${fullEvent.destination}`);
+    logger.info(`Reporting Event: ${fullEvent.eventType} to ${fullEvent.destination}`);
+    metrics.increment('events_reported');
+    metrics.increment(`event_${fullEvent.eventType}`);
     sendToBSM(fullEvent);
 }
 
@@ -134,7 +159,8 @@ function reportStatusUpdate(snapshot: Omit<AgentStatusSnapshot, 'agentId' | 'tim
         timestamp: new Date().toISOString(),
         destination: 'commander' // Status updates always go to the commander
     };
-    // console.log(`Reporting Status Snapshot`); // Avoid excessive logging
+    // logger.info(`Reporting Status Snapshot`); // Avoid excessive logging
+    metrics.increment('status_updates_sent');
     sendToBSM(fullSnapshot);
 }
 
@@ -143,7 +169,7 @@ function reportStatusUpdate(snapshot: Omit<AgentStatusSnapshot, 'agentId' | 'tim
 let bot: mineflayer.Bot;
 
 function initializeBot() {
-    console.log('Initializing Mineflayer bot...');
+    logger.info('Initializing Mineflayer bot...');
     bot = mineflayer.createBot({
         host: MINECRAFT_HOST,
         port: MINECRAFT_PORT,
@@ -159,7 +185,8 @@ function initializeBot() {
     });
 
     bot.once('spawn', () => {
-        console.log(`Bot ${AGENT_ID} spawned successfully.`);
+        logger.info(`Bot ${AGENT_ID} spawned successfully.`);
+        metrics.increment('minecraft_spawns');
         // TODO: Initial status report?
         // reportStatusUpdate({ status: { /* initial state */ } });
     });
@@ -167,21 +194,24 @@ function initializeBot() {
     bot.on('chat', (username, message) => {
         // Example: Respond to direct messages? Or just log?
         if (username === bot.username) return;
-        console.log(`[CHAT] ${username}: ${message}`);
+        logger.info(`[CHAT] ${username}: ${message}`);
     });
 
     bot.on('kicked', (reason, loggedIn) => {
-        console.error(`Bot ${AGENT_ID} kicked. Reason:`, reason);
+        logger.error(`Bot ${AGENT_ID} kicked. Reason:`, reason);
+        metrics.increment('minecraft_kicks');
         // TODO: Handle kick event, maybe try reconnecting?
     });
 
     bot.on('error', (err) => {
-        console.error(`Bot ${AGENT_ID} error:`, err);
+        logger.error(`Bot ${AGENT_ID} error:`, err);
+        metrics.increment('minecraft_errors');
         // TODO: Handle bot errors
     });
 
     bot.on('end', (reason) => {
-        console.log(`Bot ${AGENT_ID} disconnected. Reason: ${reason}`);
+        logger.info(`Bot ${AGENT_ID} disconnected. Reason: ${reason}`);
+        metrics.increment('minecraft_disconnects');
         // TODO: Handle disconnect, attempt reconnect?
         // setTimeout(initializeBot, 15000); // Example reconnect
     });
@@ -253,7 +283,7 @@ function initializeBot() {
 
 // --- Command Validation Layer ---
 function validateCommand(task: TaskObject): boolean {
-    console.log(`Validating command: ${task.type}`);
+    logger.info(`Validating command: ${task.type}`);
     // TODO: Implement actual validation logic based on task type and agent state
     // e.g., check if required tools/materials are present for Craft/Build
     // e.g., check if target coordinates are reachable for NavigateTo
@@ -270,9 +300,9 @@ class TaskExecutionManager {
     }
 
     handleNewCommand(taskId: string, task: TaskObject) {
-        console.log(`TEM received task ${taskId}: ${task.type}`);
+        logger.info(`TEM received task ${taskId}: ${task.type}`);
         if (!validateCommand(task)) {
-            console.warn(`Task ${taskId} rejected by validation.`);
+            logger.warn(`Task ${taskId} rejected by validation.`);
             reportEvent({ eventType: 'taskRejected', taskId, details: { reason: 'Validation failed' } });
             return;
         }
@@ -280,7 +310,7 @@ class TaskExecutionManager {
         // Simple handling: Stop current task and execute new one immediately
         // TODO: Implement proper queueing, prioritization, preemption logic
         if (this.currentTask) {
-            console.log(`Interrupting current task ${this.currentTask.id} for new task ${taskId}`);
+            logger.info(`Interrupting current task ${this.currentTask.id} for new task ${taskId}`);
             // TODO: Add logic to gracefully stop the current task in modules
             reportEvent({ eventType: 'taskFailed', taskId: this.currentTask.id, details: { reason: 'Interrupted by new task' } });
         }
@@ -293,7 +323,7 @@ class TaskExecutionManager {
         if (!this.currentTask) return;
 
         const { id: taskId, type, details } = this.currentTask;
-        console.log(`TEM executing task ${taskId}: ${type}`);
+        logger.info(`TEM executing task ${taskId}: ${type}`);
         let success = false;
         let failureReason = "Unknown execution error";
 
@@ -327,22 +357,22 @@ class TaskExecutionManager {
                 // Add cases for all other TaskTypes, calling the appropriate module function
                 // e.g., Smelt, PlaceBlock, Build, Follow, Transport, ManageContainer
                 default:
-                    console.warn(`Task type ${type} not implemented in TEM.`);
+                    logger.warn(`Task type ${type} not implemented in TEM.`);
                     failureReason = "Not Implemented";
                     success = false;
             }
         } catch (error: any) {
-            console.error(`Error executing task ${taskId} (${type}):`, error);
+            logger.error(`Error executing task ${taskId} (${type}):`, error);
             failureReason = error.message || "Exception during execution";
             success = false;
         }
 
         // --- Report Completion/Failure ---
         if (success) {
-            console.log(`Task ${taskId} (${type}) completed successfully.`);
+            logger.info(`Task ${taskId} (${type}) completed successfully.`);
             reportEvent({ eventType: 'taskComplete', taskId, details: { result: "Success" } }); // Add actual results later
         } else {
-            console.error(`Task ${taskId} (${type}) failed: ${failureReason}`);
+            logger.error(`Task ${taskId} (${type}) failed: ${failureReason}`);
             reportEvent({ eventType: 'taskFailed', taskId, details: { reason: failureReason } });
         }
 
@@ -379,13 +409,13 @@ class PerceptionModule {
     private knownNearbyBlocks: Set<string> = new Set(); // Track recently reported blocks to avoid spam
 
     initialize(botInstance: mineflayer.Bot, reportFunc: typeof reportEvent) {
-        console.log("Perception Module Initializing...");
+        logger.info("Perception Module Initializing...");
         this.bot = botInstance;
         this.reportFunc = reportFunc;
 
         // Wait for bot to be ready before starting perception
         this.bot.once('spawn', () => {
-             console.log("Perception Module Activated.");
+             logger.info("Perception Module Activated.");
              this.startPerceptionLoop();
         });
 
@@ -396,7 +426,7 @@ class PerceptionModule {
 
     startPerceptionLoop() {
         if (this.perceptionIntervalId) return; // Already running
-        console.log(`Starting perception loop (Interval: ${PERCEPTION_INTERVAL}ms, Radius: ${PERCEPTION_RADIUS})`);
+        logger.info(`Starting perception loop (Interval: ${PERCEPTION_INTERVAL}ms, Radius: ${PERCEPTION_RADIUS})`);
 
         this.perceptionIntervalId = setInterval(() => {
             this.scanEnvironment();
@@ -408,7 +438,7 @@ class PerceptionModule {
 
     stopPerceptionLoop() {
         if (this.perceptionIntervalId) {
-            console.log("Stopping perception loop.");
+            logger.info("Stopping perception loop.");
             clearInterval(this.perceptionIntervalId);
             this.perceptionIntervalId = null;
         }
@@ -421,11 +451,11 @@ class PerceptionModule {
         const report = this.reportFunc;
         if (!bot || !report || !bot.entity) return;
 
-        // console.log("Perception: Scanning environment..."); // Can be noisy
+        // logger.info("Perception: Scanning environment..."); // Can be noisy
 
         const mcData = require('minecraft-data')(bot.version); // Use local bot constant
         if (!mcData) {
-            console.error("Perception Error: Failed to load minecraft-data");
+            logger.error("Perception Error: Failed to load minecraft-data");
             return;
         }
 
@@ -435,7 +465,7 @@ class PerceptionModule {
         ];
 
         if (blockTypesToFind.length === 0) {
-            console.warn("Perception: No valid block IDs found for strategic resources/POIs.");
+            logger.warn("Perception: No valid block IDs found for strategic resources/POIs.");
             return;
         }
 
@@ -448,7 +478,7 @@ class PerceptionModule {
 
         try {
             const foundBlocks = bot.findBlocks(options); // Use local bot constant
-            // console.log(`Perception: Found ${foundBlocks.length} potential blocks.`); // Debug log
+            // logger.info(`Perception: Found ${foundBlocks.length} potential blocks.`); // Debug log
 
             foundBlocks.forEach(blockPos => {
                 const block = bot.blockAt(blockPos); // Use local bot constant (already checked for null)
@@ -490,7 +520,7 @@ class PerceptionModule {
                 }
             });
         } catch (error) {
-             console.error("Perception Error during findBlocks:", error);
+             logger.error("Perception Error during findBlocks:", error);
         }
 
         // TODO: Add entity scanning (e.g., passive mobs for food/resources, hostile mobs for threat assessment)
@@ -504,7 +534,7 @@ class NavigationModule {
     // No need to store defaultMovements instance
 
      initialize(botInstance: Bot, reportFunc: typeof reportEvent) {
-        console.log("Navigation Module Initializing...");
+        logger.info("Navigation Module Initializing...");
         this.bot = botInstance;
         this.reportFunc = reportFunc;
 
@@ -513,7 +543,7 @@ class NavigationModule {
         // Use type casting for pathfinder until interface augmentation is done
         const pathfinderInstance = (this.bot as any)?.pathfinder; // Add optional chaining for safety
         if (!pathfinderInstance) {
-            console.error("Pathfinder plugin not loaded on bot instance!");
+            logger.error("Pathfinder plugin not loaded on bot instance!");
             return;
         }
 
@@ -531,18 +561,18 @@ class NavigationModule {
         };
         // Configure the instance created by the plugin
         pathfinderInstance.setMovements(movementConfig);
-        console.log("Navigation Module Initialized.");
+        logger.info("Navigation Module Initialized.");
     }
 
     async navigateTo(coords: Coordinates): Promise<boolean> {
         const bot = this.bot; // Use local variable for type safety within async function
         const pathfinderInstance = (bot as any)?.pathfinder; // Use type casting with optional chaining
         if (!bot || !pathfinderInstance) {
-            console.error("Navigation Error: Bot or Pathfinder not initialized.");
+            logger.error("Navigation Error: Bot or Pathfinder not initialized.");
             return false;
         }
 
-        console.log(`Navigation: Attempting to move to ${JSON.stringify(coords)}`);
+        logger.info(`Navigation: Attempting to move to ${JSON.stringify(coords)}`);
 
         // Define the goal (adjust x,y,z based on GoalBlock requirements - e.g., block below feet)
         // Assuming GoalBlock targets the block *at* the coordinates.
@@ -550,13 +580,13 @@ class NavigationModule {
 
         return new Promise((resolve) => {
             const onGoalReached = () => {
-                console.log(`Navigation: Goal reached at ${JSON.stringify(coords)}`);
+                logger.info(`Navigation: Goal reached at ${JSON.stringify(coords)}`);
                 cleanupListeners();
                 resolve(true);
             };
 
             const onPathError = (reason: string) => {
-                 console.error(`Navigation Error: Pathfinding failed - ${reason}`);
+                 logger.error(`Navigation Error: Pathfinding failed - ${reason}`);
                  cleanupListeners();
                  resolve(false);
             };
@@ -565,11 +595,11 @@ class NavigationModule {
              // Or potentially a specific 'error' or 'abort' event. Adjust based on actual plugin behavior.
             const onPathUpdate = (results: any) => {
                 if (results?.status === 'noPath' || results?.status === 'timeout') {
-                    console.error(`Navigation Error: Path update status - ${results.status}`);
+                    logger.error(`Navigation Error: Path update status - ${results.status}`);
                     cleanupListeners();
                     resolve(false);
                 }
-                 // console.log(`Path update: ${results?.status}`); // Optional debug log
+                 // logger.info(`Path update: ${results?.status}`); // Optional debug log
             };
 
             // Declare with let to allow reassignment later for timeout clearing
@@ -593,7 +623,7 @@ class NavigationModule {
 
              // Optional: Add a timeout for the entire navigation task
              const navigationTimeout = setTimeout(() => {
-                 console.error(`Navigation Error: Task timed out after 60 seconds.`);
+                 logger.error(`Navigation Error: Task timed out after 60 seconds.`);
                  pathfinderInstance.stop(); // Stop pathfinding
                  cleanupListeners();
                  resolve(false);
@@ -619,7 +649,7 @@ class CombatModule {
     private combatPlugin: any = null; // Store reference to plugin API (e.g., bot.swordpvp)
 
      initialize(botInstance: Bot, reportFunc: typeof reportEvent) {
-        console.log("Combat Module Initializing...");
+        logger.info("Combat Module Initializing...");
         this.bot = botInstance;
         this.reportFunc = reportFunc;
 
@@ -629,19 +659,19 @@ class CombatModule {
         this.combatPlugin = (this.bot as any)?.swordpvp; // Prioritize sword for now
 
         if (!this.combatPlugin) {
-             console.warn("Combat plugin (swordpvp) not found on bot instance! Trying bowpvp...");
+             logger.warn("Combat plugin (swordpvp) not found on bot instance! Trying bowpvp...");
              // Attempt to access bowpvp as fallback?
              this.combatPlugin = (this.bot as any)?.bowpvp;
              if (!this.combatPlugin) {
-                 console.error("Combat plugin (swordpvp/bowpvp) not found! Combat module disabled.");
+                 logger.error("Combat plugin (swordpvp/bowpvp) not found! Combat module disabled.");
                  return; // Disable module if plugin isn't loaded
              } else {
-                 console.log("Using bowpvp for combat.");
+                 logger.info("Using bowpvp for combat.");
              }
         } else {
-             console.log("Using swordpvp for combat.");
+             logger.info("Using swordpvp for combat.");
         }
-        console.log("Combat Module Initialized.");
+        logger.info("Combat Module Initialized.");
         // TODO: Configure combat plugin options if needed (e.g., bot.swordpvp.options...)
     }
 
@@ -649,11 +679,11 @@ class CombatModule {
          const bot = this.bot;
          const combatApi = this.combatPlugin;
          if (!bot || !combatApi) {
-             console.error("Combat Error: Bot or Combat Plugin not initialized.");
+             logger.error("Combat Error: Bot or Combat Plugin not initialized.");
              return false;
          }
 
-         console.log(`Combat: Attempting to attack entity ${targetEntityId}`);
+         logger.info(`Combat: Attempting to attack entity ${targetEntityId}`);
 
          // Find the entity object by its ID (or potentially username)
          // Note: bot.entities might store entities by numerical ID or UUID depending on version/server
@@ -665,7 +695,7 @@ class CombatModule {
 
 
          if (!targetEntity) {
-             console.error(`Combat Error: Target entity '${targetEntityId}' not found.`);
+             logger.error(`Combat Error: Target entity '${targetEntityId}' not found.`);
              // Report failure back?
              // this.reportFunc?.({ eventType: 'taskFailed', details: { reason: `Target entity ${targetEntityId} not found` } });
              return false;
@@ -675,18 +705,18 @@ class CombatModule {
              // Call the plugin's attack method
              // Assuming the API is bot.swordpvp.attack(entity) or similar
              if (typeof combatApi.attack !== 'function') {
-                 console.error(`Combat Error: Combat plugin does not have an 'attack' function.`);
+                 logger.error(`Combat Error: Combat plugin does not have an 'attack' function.`);
                  return false;
              }
              combatApi.attack(targetEntity);
              // The combat plugin likely handles the attack loop internally.
              // We might need listeners for completion/failure if the plugin provides them.
-             console.log(`Combat: Attack command issued for ${targetEntityId}.`);
+             logger.info(`Combat: Attack command issued for ${targetEntityId}.`);
              // For now, assume command issuance is success. Need event handling for true success.
              // Consider reporting taskProgress here?
              return true;
          } catch (error: any) {
-             console.error(`Combat Error: Failed to execute attack command for ${targetEntityId}:`, error);
+             logger.error(`Combat Error: Failed to execute attack command for ${targetEntityId}:`, error);
              return false;
          }
      }
@@ -695,7 +725,7 @@ class CombatModule {
          const bot = this.bot;
          const combatApi = this.combatPlugin;
           if (!bot || !combatApi) {
-             console.error("Combat Error: Bot or Combat Plugin not initialized.");
+             logger.error("Combat Error: Bot or Combat Plugin not initialized.");
              return false;
          }
 
@@ -715,32 +745,32 @@ class CombatModule {
              if (targetEntity) {
                  guardPosition = targetEntity.position;
              } else {
-                  console.error(`Combat Error: Guard target entity ${target.entityId} not found.`);
+                  logger.error(`Combat Error: Guard target entity ${target.entityId} not found.`);
                   return false;
              }
          }
 
          if (!guardPosition) {
-              console.error(`Combat Error: Could not determine guard position.`);
+              logger.error(`Combat Error: Could not determine guard position.`);
               return false;
          }
 
-         console.log(`Combat: Attempting to guard position ${JSON.stringify(guardPosition)} within ${radius}m`);
+         logger.info(`Combat: Attempting to guard position ${JSON.stringify(guardPosition)} within ${radius}m`);
 
          try {
              // Assuming an API like bot.swordpvp.guard(position, radius)
              // The actual API might differ, consult the plugin docs/code.
              if (typeof combatApi.guard === 'function') {
                  combatApi.guard(guardPosition, radius); // Call the guard function
-                 console.log(`Combat: Guard command issued.`);
+                 logger.info(`Combat: Guard command issued.`);
                  // Assume command issuance is success. Need event handling for confirmation/failure.
                  return true;
              } else {
-                  console.error(`Combat Error: Plugin does not support guard function.`);
+                  logger.error(`Combat Error: Plugin does not support guard function.`);
                   return false;
              }
          } catch (error: any) {
-             console.error(`Combat Error: Failed to execute guard command:`, error);
+             logger.error(`Combat Error: Failed to execute guard command:`, error);
              return false;
          }
      }
@@ -753,24 +783,24 @@ class MineModule {
     private mcData: any = null;
 
      initialize(botInstance: Bot, reportFunc: typeof reportEvent) {
-        console.log("Mine Module Initializing...");
+        logger.info("Mine Module Initializing...");
         this.bot = botInstance;
         this.reportFunc = reportFunc;
         this.mcData = require('minecraft-data')(botInstance.version);
-        console.log("Mine Module Initialized.");
+        logger.info("Mine Module Initialized.");
     }
 
      async gather(resource: string, quantity: number, targetArea?: Coordinates): Promise<boolean> {
          const bot = this.bot;
          if (!bot || !this.mcData) {
-             console.error("Mining Error: Bot or mcData not initialized.");
+             logger.error("Mining Error: Bot or mcData not initialized.");
              return false;
          }
-         console.log(`Mining: Attempting to gather ${quantity} of ${resource} ${targetArea ? `near ${JSON.stringify(targetArea)}` : ''}`);
+         logger.info(`Mining: Attempting to gather ${quantity} of ${resource} ${targetArea ? `near ${JSON.stringify(targetArea)}` : ''}`);
 
          const item = this.mcData.itemsByName[resource] || this.mcData.blocksByName[resource];
          if (!item) {
-             console.error(`Mining Error: Unknown resource type ${resource}`);
+             logger.error(`Mining Error: Unknown resource type ${resource}`);
              return false;
          }
 
@@ -785,17 +815,17 @@ class MineModule {
              });
 
              if (!block) {
-                 console.log(`Mining: No more ${resource} found nearby.`);
+                 logger.info(`Mining: No more ${resource} found nearby.`);
                  // Report partial success or failure based on gatheredCount vs quantity
                  return gatheredCount > 0;
              }
 
-             console.log(`Mining: Found ${resource} at ${block.position}`);
+             logger.info(`Mining: Found ${resource} at ${block.position}`);
 
              // Navigate to the block (use NavigationModule)
              const reached = await navigationModule.navigateTo(block.position);
              if (!reached) {
-                 console.error(`Mining Error: Failed to navigate to ${resource} at ${block.position}`);
+                 logger.error(`Mining Error: Failed to navigate to ${resource} at ${block.position}`);
                  // Consider blacklisting this block or area?
                  return false; // Or report partial success if some were gathered
              }
@@ -807,23 +837,23 @@ class MineModule {
              if (bestTool) {
                  await inventoryModule.equip(bestTool.name, 'hand'); // Use InventoryModule to equip
              } else if (block.material && !bot.heldItem?.name.includes('pickaxe')) { // Simple fallback
-                 console.warn(`Mining Warning: No suitable tool found for ${resource}, attempting with hand/current item.`);
+                 logger.warn(`Mining Warning: No suitable tool found for ${resource}, attempting with hand/current item.`);
              }
 
              // Dig the block
              try {
-                 console.log(`Mining: Digging ${resource} at ${block.position}`);
+                 logger.info(`Mining: Digging ${resource} at ${block.position}`);
                  await bot.dig(block);
                  gatheredCount++; // Increment count - assumes 1 drop per block for simplicity
-                 console.log(`Mining: Gathered ${gatheredCount}/${quantity} of ${resource}`);
+                 logger.info(`Mining: Gathered ${gatheredCount}/${quantity} of ${resource}`);
                  // Mineflayer's dig usually handles collection, but bot.collectBlock could be used if needed
              } catch (err: any) {
-                 console.error(`Mining Error: Failed to dig ${resource} at ${block.position}:`, err.message);
+                 logger.error(`Mining Error: Failed to dig ${resource} at ${block.position}:`, err.message);
                  return false; // Failed to dig this block
              }
          }
 
-         console.log(`Mining: Successfully gathered ${gatheredCount}/${quantity} of ${resource}.`);
+         logger.info(`Mining: Successfully gathered ${gatheredCount}/${quantity} of ${resource}.`);
          return true;
      }
 }
@@ -835,31 +865,31 @@ class InventoryModule {
     private mcData: any = null; // To store minecraft-data
 
     initialize(botInstance: Bot, reportFunc: typeof reportEvent) {
-        console.log("Inventory Module Initializing...");
+        logger.info("Inventory Module Initializing...");
         this.bot = botInstance;
         this.reportFunc = reportFunc;
         this.mcData = require('minecraft-data')(botInstance.version);
-        console.log("Inventory Module Initialized.");
+        logger.info("Inventory Module Initialized.");
     }
 
     async equip(itemType: string, destination: 'hand' | 'head' | 'torso' | 'legs' | 'feet' | 'off-hand'): Promise<boolean> {
         const bot = this.bot;
         if (!bot || !this.mcData) {
-             console.error("Inventory Error: Bot or mcData not initialized.");
+             logger.error("Inventory Error: Bot or mcData not initialized.");
              return false;
         }
-        console.log(`Inventory: Attempting to equip ${itemType} to ${destination}`);
+        logger.info(`Inventory: Attempting to equip ${itemType} to ${destination}`);
         try {
             const item = this.findItem(itemType); // Find item first
             if (!item) {
-                console.error(`Inventory Error: Item ${itemType} not found to equip.`);
+                logger.error(`Inventory Error: Item ${itemType} not found to equip.`);
                 return false;
             }
             await bot.equip(item, destination);
-            console.log(`Inventory: Successfully equipped ${itemType} to ${destination}.`);
+            logger.info(`Inventory: Successfully equipped ${itemType} to ${destination}.`);
             return true;
         } catch (error: any) {
-            console.error(`Inventory Error: Failed to equip ${itemType}:`, error);
+            logger.error(`Inventory Error: Failed to equip ${itemType}:`, error);
             return false;
         }
     }
@@ -867,28 +897,28 @@ class InventoryModule {
     async toss(itemType: string, quantity: number | null): Promise<boolean> {
          const bot = this.bot;
          if (!bot || !this.mcData) {
-             console.error("Inventory Error: Bot or mcData not initialized.");
+             logger.error("Inventory Error: Bot or mcData not initialized.");
              return false;
          }
-         console.log(`Inventory: Attempting to toss ${quantity ?? 'all'} of ${itemType}`);
+         logger.info(`Inventory: Attempting to toss ${quantity ?? 'all'} of ${itemType}`);
          try {
              const item = this.findItem(itemType); // Find item first
              if (!item) {
-                 console.error(`Inventory Error: Item ${itemType} not found to toss.`);
+                 logger.error(`Inventory Error: Item ${itemType} not found to toss.`);
                  return false;
              }
              if (quantity === null || quantity >= item.count) {
                  // Toss the whole stack
                  await bot.tossStack(item);
-                 console.log(`Inventory: Tossed entire stack of ${itemType}.`);
+                 logger.info(`Inventory: Tossed entire stack of ${itemType}.`);
              } else {
                  // Toss specific quantity
                  await bot.toss(item.type, null, quantity); // metadata is null for now
-                 console.log(`Inventory: Tossed ${quantity} of ${itemType}.`);
+                 logger.info(`Inventory: Tossed ${quantity} of ${itemType}.`);
              }
              return true;
          } catch (error: any) {
-             console.error(`Inventory Error: Failed to toss ${itemType}:`, error);
+             logger.error(`Inventory Error: Failed to toss ${itemType}:`, error);
              return false;
          }
     }
@@ -896,13 +926,13 @@ class InventoryModule {
     findItem(itemType: string): Item | null {
         const bot = this.bot;
         if (!bot || !bot.inventory || !this.mcData) {
-             console.error("Inventory Error: Bot, inventory, or mcData not initialized for findItem.");
+             logger.error("Inventory Error: Bot, inventory, or mcData not initialized for findItem.");
              return null;
         }
         // Find item by name using minecraft-data to get the ID
         const itemData = this.mcData.itemsByName[itemType];
         if (!itemData) {
-            console.warn(`Inventory Warning: Unknown item name '${itemType}' for findItem.`);
+            logger.warn(`Inventory Warning: Unknown item name '${itemType}' for findItem.`);
             return null;
         }
         // Use findInventoryItem with the correct item ID and pass false for useByName
@@ -912,13 +942,13 @@ class InventoryModule {
      itemCount(itemType: string): number {
          const bot = this.bot;
           if (!bot || !bot.inventory || !this.mcData) {
-             console.error("Inventory Error: Bot, inventory, or mcData not initialized for itemCount.");
+             logger.error("Inventory Error: Bot, inventory, or mcData not initialized for itemCount.");
              return 0;
          }
          // Find item ID from name
          const itemData = this.mcData.itemsByName[itemType];
          if (!itemData) {
-             console.warn(`Inventory Warning: Unknown item name '${itemType}' for itemCount.`);
+             logger.warn(`Inventory Warning: Unknown item name '${itemType}' for itemCount.`);
              return 0;
          }
          // Use bot.inventory.count with item ID
@@ -933,31 +963,31 @@ class CraftingModule {
     private mcData: any = null;
 
     initialize(botInstance: Bot, reportFunc: typeof reportEvent) {
-        console.log("Crafting Module Initializing...");
+        logger.info("Crafting Module Initializing...");
         this.bot = botInstance;
         this.reportFunc = reportFunc;
         this.mcData = require('minecraft-data')(botInstance.version);
-        console.log("Crafting Module Initialized.");
+        logger.info("Crafting Module Initialized.");
     }
 
     async craftItem(itemType: string, quantity: number = 1, recipe?: Recipe): Promise<boolean> {
         const bot = this.bot;
         if (!bot || !this.mcData) {
-            console.error("Crafting Error: Bot or mcData not initialized.");
+            logger.error("Crafting Error: Bot or mcData not initialized.");
             return false;
         }
-        console.log(`Crafting: Attempting to craft ${quantity} of ${itemType}`);
+        logger.info(`Crafting: Attempting to craft ${quantity} of ${itemType}`);
 
         try {
             const item = this.mcData.itemsByName[itemType];
             if (!item) {
-                console.error(`Crafting Error: Unknown item type ${itemType}`);
+                logger.error(`Crafting Error: Unknown item type ${itemType}`);
                 return false;
             }
 
             const recipes = bot.recipesFor(item.id, null, 1, null); // Find recipes for the item
             if (!recipes || recipes.length === 0) {
-                 console.error(`Crafting Error: No recipe found for ${itemType}`);
+                 logger.error(`Crafting Error: No recipe found for ${itemType}`);
                  return false;
             }
 
@@ -972,20 +1002,20 @@ class CraftingModule {
                     maxDistance: 4, // Look within 4 blocks
                 });
                 if (!craftingTable) {
-                    console.warn(`Crafting Warning: Crafting table required for ${itemType} but none found nearby.`);
+                    logger.warn(`Crafting Warning: Crafting table required for ${itemType} but none found nearby.`);
                     // TODO: Add logic to place a crafting table if available in inventory
                     return false; // Fail for now if table needed but not found
                 }
             }
 
-            console.log(`Crafting: Using recipe for ${itemType}. Table needed: ${recipeToUse.requiresTable}`);
+            logger.info(`Crafting: Using recipe for ${itemType}. Table needed: ${recipeToUse.requiresTable}`);
             await bot.craft(recipeToUse, quantity, craftingTable ?? undefined); // Convert null to undefined
-            console.log(`Crafting: Successfully crafted ${quantity} of ${itemType}.`);
+            logger.info(`Crafting: Successfully crafted ${quantity} of ${itemType}.`);
             // TODO: Add logic to reclaim crafting table if placed by the bot
             return true;
 
         } catch (error: any) {
-            console.error(`Crafting Error: Failed to craft ${itemType}:`, error);
+            logger.error(`Crafting Error: Failed to craft ${itemType}:`, error);
             return false;
         }
     }
@@ -997,19 +1027,19 @@ class ExploreModule { // Added Skeleton
     private reportFunc: typeof reportEvent | null = null;
 
     initialize(botInstance: Bot, reportFunc: typeof reportEvent) {
-        console.log("Explore Module Initializing...");
+        logger.info("Explore Module Initializing...");
         this.bot = botInstance;
         this.reportFunc = reportFunc;
-        console.log("Explore Module Initialized.");
+        logger.info("Explore Module Initialized.");
     }
 
     async exploreArea(area?: { center: Coordinates; radius: number }): Promise<boolean> {
-        console.log(`Exploring ${area ? `area around ${JSON.stringify(area.center)} with radius ${area.radius}` : 'current vicinity'} (Not Implemented)`);
+        logger.info(`Exploring ${area ? `area around ${JSON.stringify(area.center)} with radius ${area.radius}` : 'current vicinity'} (Not Implemented)`);
         // TODO: Implement exploration logic (e.g., random walk, systematic scan, follow terrain)
         // Could potentially use NavigationModule for movement.
         // Should likely run for a duration or until a specific condition is met.
         await new Promise(resolve => setTimeout(resolve, 5000)); // Simulate exploring for 5 seconds
-        console.log("Exploration step finished (Placeholder).");
+        logger.info("Exploration step finished (Placeholder).");
         return true; // Placeholder success
     }
 }
@@ -1019,6 +1049,8 @@ const exploreModule = new ExploreModule(); // Instantiate
 // --- Main Execution ---
 
 function handleIncomingCommand(taskId: string, task: TaskObject) {
+    metrics.increment('commands_received');
+    metrics.increment(`command_${task.type}`);
     taskExecutionManager.handleNewCommand(taskId, task);
 }
 
@@ -1032,24 +1064,28 @@ setTimeout(() => {
     if (isRegisteredWithBSM) {
         initializeBot();
     } else {
-        console.warn("Delay ended but not registered with BSM. Bot initialization postponed.");
+        logger.warn("Delay ended but not registered with BSM. Bot initialization postponed.");
         // Need logic here to trigger initializeBot once registration happens if connectToBSM succeeds later.
     }
 }, 2000); // Wait 2 seconds after starting BSM connection attempt
 
 
 // --- Graceful Shutdown ---
-function agentShutdown() {
-    console.log(`Agent ${AGENT_ID} shutting down...`);
+const shutdown = createGracefulShutdown(logger);
+
+// Register cleanup handlers (LIFO order)
+shutdown.register(async () => {
+    logger.info('Closing BSM TCP connection...');
+    if (bsmSocket && !bsmSocket.destroyed) {
+        bsmSocket.end();
+    }
+});
+
+shutdown.register(async () => {
+    logger.info('Disconnecting from Minecraft server...');
     if (bot) {
         bot.quit('Agent shutting down');
+        // Give bot time to disconnect cleanly
+        await new Promise(resolve => setTimeout(resolve, 500));
     }
-    if (bsmSocket && !bsmSocket.destroyed) {
-        bsmSocket.end(); // Close TCP connection gracefully
-    }
-    // Give time for cleanup
-    setTimeout(() => process.exit(0), 1000);
-}
-
-process.on('SIGTERM', agentShutdown);
-process.on('SIGINT', agentShutdown);
+});

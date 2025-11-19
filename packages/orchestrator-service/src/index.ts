@@ -1,23 +1,67 @@
 import WebSocket, { WebSocketServer } from 'ws';
 import http from 'http';
 import { GoogleGenerativeAI, FunctionDeclarationSchemaType, Part, FunctionDeclaration, GenerateContentRequest, Content, ChatSession, FunctionDeclarationSchema } from '@google/generative-ai';
-import { WebSocketMessage, AgentInfo, SquadInfo, Coordinates } from '@aetherius/shared-types';
+import {
+  WebSocketMessage,
+  AgentInfo,
+  SquadInfo,
+  Coordinates,
+  createLogger,
+  validateConfig,
+  orchestratorConfigSchema,
+  createGracefulShutdown,
+  HealthCheck,
+  HealthChecks,
+  metrics,
+  CircuitBreaker,
+  LLMCache,
+  RateLimiter,
+  retryWithBackoff
+} from '@aetherius/shared-types';
 import { fork, ChildProcess } from 'child_process';
 import path from 'path';
 
-// --- Configuration ---
-const PORT = parseInt(process.env.ORCHESTRATOR_PORT || '5000', 10);
-const WS_PORT = parseInt(process.env.ORCHESTRATOR_WS_PORT || '5001', 10);
-const WORLD_STATE_API_ADDRESS = process.env.WORLD_STATE_API_ADDRESS || 'http://localhost:3000';
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const SQUAD_LEADER_SCRIPT_PATH = process.env.SQUAD_LEADER_SCRIPT_PATH || path.resolve(__dirname, '../../squad-leader/dist/index.js');
+// --- Initialize Logger ---
+const logger = createLogger('orchestrator-service');
 
-console.log(`--- Orchestrator Service ---`);
-console.log(`HTTP Port (Placeholder): ${PORT}`);
-console.log(`WebSocket Port: ${WS_PORT}`);
-console.log(`World State API Address: ${WORLD_STATE_API_ADDRESS}`);
-console.log(`Squad Leader Script Path: ${SQUAD_LEADER_SCRIPT_PATH}`);
+// --- Validate Configuration ---
+const config = validateConfig(orchestratorConfigSchema, 'Orchestrator Service');
 
+logger.info('Starting Orchestrator Service', {
+  httpPort: config.ORCHESTRATOR_PORT,
+  wsPort: config.ORCHESTRATOR_WS_PORT,
+  worldStateApi: config.WORLD_STATE_API_ADDRESS,
+  squadLeaderPath: config.SQUAD_LEADER_SCRIPT_PATH || path.resolve(__dirname, '../../squad-leader/dist/index.js')
+});
+
+const PORT = config.ORCHESTRATOR_PORT;
+const WS_PORT = config.ORCHESTRATOR_WS_PORT;
+const WORLD_STATE_API_ADDRESS = config.WORLD_STATE_API_ADDRESS;
+const GEMINI_API_KEY = config.GEMINI_API_KEY;
+const SQUAD_LEADER_SCRIPT_PATH = config.SQUAD_LEADER_SCRIPT_PATH || path.resolve(__dirname, '../../squad-leader/dist/index.js');
+
+// --- Initialize Resilience Patterns ---
+// Circuit breaker for Gemini API calls (prevents cascading failures)
+const geminiCircuitBreaker = new CircuitBreaker('gemini-api', {
+  failureThreshold: 5,
+  resetTimeout: 60000,
+  onStateChange: (state) => logger.warn('Gemini API circuit breaker state changed', { state })
+});
+
+// LLM cache for strategic planning responses (reduces API costs)
+const llmCache = new LLMCache({ ttl: 5 * 60 * 1000 }); // 5 minute TTL
+
+// Rate limiter for Gemini Pro (60 calls/minute)
+const geminiRateLimiter = new RateLimiter({
+  maxCalls: 60,
+  windowMs: 60000
+});
+
+logger.info('Resilience patterns initialized', {
+  circuitBreaker: 'gemini-api',
+  llmCacheTTL: '5 minutes',
+  rateLimit: '60 calls/minute'
+});
 
 // --- State ---
 const knownBSMs: Map<string, { address: string; ws: WebSocket | null }> = new Map();
@@ -56,11 +100,10 @@ const squadFailureCounts: Map<string, number> = new Map(); // Track squad failur
 const SQUAD_FAILURE_THRESHOLD = 3; // Threshold for triggering re-plan due to repeated failures
 
 // --- LLM Planner ---
-if (!GEMINI_API_KEY) {
-    console.warn("WARNING: GEMINI_API_KEY environment variable not set. LLM Planner will not function.");
-}
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY || "DUMMY_KEY");
+const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const plannerModel = genAI.getGenerativeModel({ model: "gemini-1.5-pro-latest" });
+
+logger.info('Gemini AI planner initialized', { model: 'gemini-1.5-pro-latest' });
 
 // --- Define Tools for Gemini Pro ---
 const orchestratorTools: FunctionDeclaration[] = [
@@ -152,22 +195,26 @@ const orchestratorTools: FunctionDeclaration[] = [
 
 // --- Strategic Planning Function (Refactored for Goal 1 & 4) ---
 async function runStrategicPlanning(triggeringEvent?: any) {
-    if (!GEMINI_API_KEY) {
-        console.log("Strategic planning skipped: API key missing.");
-        return;
-    }
     if (isStrategicPlanningActive) {
-        console.log("Strategic planning skipped: Previous run still active.");
+        logger.debug('Strategic planning skipped: Previous run still active');
         return;
     }
     isStrategicPlanningActive = true;
-    console.log("Running strategic planning...");
-    if (triggeringEvent) console.log("Triggering Event:", triggeringEvent);
+    const planningStartTime = Date.now();
+
+    logger.info('Starting strategic planning cycle', {
+      triggeringEvent: triggeringEvent ? triggeringEvent.type : 'initial'
+    });
+    if (triggeringEvent) {
+        logger.debug('Planning triggered by event', { event: triggeringEvent });
+    }
+
+    metrics.increment('strategic_planning_cycles');
 
     try {
         // --- Initialize Chat Session ---
         if (!strategicChatSession) {
-            console.log("Initializing new strategic chat session...");
+            logger.info('Initializing new strategic chat session');
             strategicChatSession = plannerModel.startChat({
                 history: [], // Start fresh
                 tools: [{ functionDeclarations: orchestratorTools }],
@@ -212,21 +259,54 @@ Base decisions *only* on provided context and conversation history. Prioritize t
         userPromptParts.push(`Review the context. Update the plan ('setPlanRepresentation') if needed. If critical info is missing, query ('requestWorldStateQuery'). Otherwise, delegate the next task ('delegateTaskToSquad').`);
         const userPrompt = userPromptParts.join('\n');
 
-        // --- LLM Interaction Loop ---
-        console.log("--- Sending Initial Message to Gemini Pro ---");
-        let llmResponse = await strategicChatSession.sendMessage(userPrompt);
+        // --- LLM Interaction Loop with Resilience Patterns ---
+        logger.debug('Preparing to call Gemini Pro for strategic planning');
+
+        // Check cache first
+        const cacheKey = llmCache.getCacheKey(userPrompt, {
+          worldState: worldStateSummary,
+          availableAgents: availableAgents.length,
+          activeSquads: activeSquadSummaries.length
+        });
+
+        let llmResponse: any;
+        const cachedResponse = llmCache.get(cacheKey);
+
+        if (cachedResponse) {
+            logger.info('Using cached LLM response for strategic planning');
+            metrics.increment('llm_cache_hits');
+            llmResponse = cachedResponse;
+        } else {
+            logger.info('Calling Gemini Pro API for strategic planning');
+            metrics.increment('llm_cache_misses');
+
+            // Apply rate limiting
+            await geminiRateLimiter.waitIfNeeded();
+
+            // Execute through circuit breaker with metrics
+            llmResponse = await metrics.measureAsync('llm_strategic_call', async () => {
+                return await geminiCircuitBreaker.execute(async () => {
+                    return await strategicChatSession!.sendMessage(userPrompt);
+                });
+            });
+
+            // Cache the response
+            llmCache.set(cacheKey, llmResponse);
+            logger.debug('LLM response cached successfully');
+        }
 
         while (true) {
             const response = llmResponse.response;
             const functionCalls = response.functionCalls();
 
             if (functionCalls && functionCalls.length > 0) {
-                console.log(`LLM Response: ${functionCalls.length} function call(s)`);
+                logger.info('LLM requested function calls', { count: functionCalls.length });
+                metrics.increment('llm_function_calls', functionCalls.length);
                 const functionResponses: Part[] = [];
 
                 for (const call of functionCalls) {
                     const { name, args } = call;
-                    console.log(`Executing tool: ${name} with args:`, args);
+                    logger.debug('Executing LLM tool', { tool: name, args });
                     let functionResultPayload: any = { success: false, error: "Unknown error during execution" };
 
                     try {
@@ -236,8 +316,9 @@ Base decisions *only* on provided context and conversation history. Prioritize t
                                 if (typedArgs.missionDescription && typedArgs.taskDetails && typedArgs.requiredAgents && typedArgs.selectionCriteria) {
                                     createAndAssignSquad(typedArgs.missionDescription, typedArgs.taskDetails, typedArgs.requiredAgents, typedArgs.selectionCriteria);
                                     functionResultPayload = { success: true, status: "Squad spawning initiated" };
+                                    metrics.increment('squads_delegated');
                                 } else {
-                                    console.error("Invalid arguments for delegateTaskToSquad:", args);
+                                    logger.error('Invalid arguments for delegateTaskToSquad', { args });
                                     functionResultPayload = { success: false, error: "Invalid arguments" };
                                 }
                                 break;
@@ -246,10 +327,11 @@ Base decisions *only* on provided context and conversation history. Prioritize t
                                 const typedArgs = args as { query: object };
                                 if (typedArgs.query) {
                                     const queryResult = await queryWorldState(typedArgs.query);
-                                    console.log("World state query result obtained.");
+                                    logger.debug('World state query completed', { resultCount: queryResult?.length ?? 0 });
                                     functionResultPayload = { success: true, result: queryResult ?? 'Query failed or returned null' };
+                                    metrics.increment('world_state_queries');
                                 } else {
-                                    console.error("Invalid arguments for requestWorldStateQuery:", args);
+                                    logger.error('Invalid arguments for requestWorldStateQuery', { args });
                                     functionResultPayload = { success: false, error: "Invalid arguments" };
                                 }
                                 break;
@@ -257,42 +339,49 @@ Base decisions *only* on provided context and conversation history. Prioritize t
                             case "setPlanRepresentation": {
                                 const typedArgs = args as { plan: PlanRepresentation };
                                 if (typedArgs.plan && Array.isArray(typedArgs.plan)) {
-                                    console.log("Updating plan representation via LLM.");
+                                    logger.info('Updating plan representation via LLM', { phases: typedArgs.plan.length });
                                     currentPlanRepresentation = typedArgs.plan as PlanRepresentation;
                                     functionResultPayload = { success: true, status: "Plan updated" };
+                                    metrics.increment('plan_updates');
                                 } else {
-                                    console.error("Invalid arguments for setPlanRepresentation: structure mismatch.", args);
+                                    logger.error('Invalid arguments for setPlanRepresentation: structure mismatch', { args });
                                     functionResultPayload = { success: false, error: "Invalid plan structure provided" };
                                 }
                                 break;
                             }
                             default:
-                                console.warn(`Unknown function call requested by LLM: ${name}`);
+                                logger.warn('Unknown function call requested by LLM', { functionName: name });
                                 functionResultPayload = { success: false, error: `Unknown function: ${name}` };
                         }
                     } catch (toolError) {
-                        console.error(`Error executing tool ${name}:`, toolError);
+                        logger.error('Error executing LLM tool', { tool: name, error: toolError });
+                        metrics.increment('tool_execution_errors');
                         functionResultPayload = { success: false, error: toolError instanceof Error ? toolError.message : String(toolError) };
                     }
                     functionResponses.push({ functionResponse: { name, response: functionResultPayload } });
                 }
 
-                console.log(`Sending ${functionResponses.length} function responses back to LLM...`);
+                logger.debug('Sending function responses back to LLM', { count: functionResponses.length });
                 llmResponse = await strategicChatSession.sendMessage(functionResponses);
 
             } else {
                 const responseText = response.text();
                 if (responseText) {
-                    console.log("LLM Response (final text):", responseText);
+                    logger.info('LLM completed planning with final text', { length: responseText.length });
                 } else {
-                    console.log("LLM Response: No function calls or text content in final response.");
+                    logger.debug('LLM response: No function calls or text content in final response');
                 }
                 break; // Exit loop
             }
         }
 
+        const planningDuration = Date.now() - planningStartTime;
+        metrics.record('strategic_planning_duration', planningDuration);
+        logger.info('Strategic planning cycle completed', { durationMs: planningDuration });
+
     } catch (error) {
-        console.error("Error during strategic planning LLM interaction:", error);
+        logger.error('Error during strategic planning LLM interaction', { error });
+        metrics.increment('strategic_planning_errors');
     } finally {
         isStrategicPlanningActive = false;
     }
@@ -300,7 +389,7 @@ Base decisions *only* on provided context and conversation history. Prioritize t
 
 // --- Squad Management (with Task 2.1 Implemented) ---
 function selectAgents(count: number, criteria: any): AgentInfo[] {
-     console.log(`Selecting ${count} agents with criteria:`, criteria);
+     logger.debug('Selecting agents for squad', { count, criteria });
      let candidateAgents = Array.from(knownAgents.values()).filter(a => a.status === 'idle');
 
      // Filter by Tags
@@ -308,7 +397,10 @@ function selectAgents(count: number, criteria: any): AgentInfo[] {
          candidateAgents = candidateAgents.filter(agent =>
              agent.tags && criteria.requiredTags.every((tag: string) => agent.tags!.includes(tag))
          );
-         console.log(`Filtered agents by tags (${criteria.requiredTags.join(', ')}): ${candidateAgents.length} remaining.`);
+         logger.debug('Filtered agents by tags', {
+           tags: criteria.requiredTags.join(', '),
+           remaining: candidateAgents.length
+         });
      }
 
      // Filter by Inventory
@@ -319,12 +411,19 @@ function selectAgents(count: number, criteria: any): AgentInfo[] {
                  (agent.keyInventorySummary![item] || 0) >= (requiredCount as number)
              );
          });
-         console.log(`Filtered agents by inventory (${JSON.stringify(criteria.requiredInventory)}): ${candidateAgents.length} remaining.`);
+         logger.debug('Filtered agents by inventory', {
+           requirements: criteria.requiredInventory,
+           remaining: candidateAgents.length
+         });
      }
 
      // Check if enough agents remain
      if (candidateAgents.length < count) {
-         console.warn(`Not enough idle agents (${candidateAgents.length}) matching criteria to fulfill request for ${count}.`);
+         logger.warn('Not enough idle agents matching criteria', {
+           available: candidateAgents.length,
+           required: count
+         });
+         metrics.increment('agent_selection_failures');
          return [];
      }
 
@@ -342,18 +441,22 @@ function selectAgents(count: number, criteria: any): AgentInfo[] {
              return distA - distB;
          });
          selectedAgents = candidateAgents.slice(0, count);
-         console.log(`Selected agents by proximity:`, selectedAgents.map(a => `${a.agentId} (Dist sq: ${a.lastKnownLocation ? distanceSquared(a.lastKnownLocation, target) : 'Unknown'})`));
+         logger.info('Selected agents by proximity', {
+           agentIds: selectedAgents.map(a => a.agentId),
+           targetCoords: target
+         });
      } else {
          // Default to Random Selection from candidates
-         console.log("Using random agent selection from candidates.");
+         logger.debug('Using random agent selection from candidates');
          const available = [...candidateAgents];
          for (let i = 0; i < count && available.length > 0; i++) {
              const randomIndex = Math.floor(Math.random() * available.length);
              selectedAgents.push(available.splice(randomIndex, 1)[0]);
          }
-         console.log(`Selected agents randomly:`, selectedAgents.map(a => a.agentId));
+         logger.info('Selected agents randomly', { agentIds: selectedAgents.map(a => a.agentId) });
      }
 
+     metrics.increment('agents_selected', selectedAgents.length);
      return selectedAgents;
 }
 
@@ -367,21 +470,24 @@ function distanceSquared(pos1: Coordinates, pos2: Coordinates): number {
 
 
 function createAndAssignSquad(missionDescription: string, taskDetails: object, requiredAgents: number, selectionCriteria: object) {
-    console.log(`Attempting to create squad for mission: ${missionDescription}`);
+    logger.info('Attempting to create squad for mission', { mission: missionDescription, requiredAgents });
     const selectedAgents = selectAgents(requiredAgents, selectionCriteria);
 
     if (selectedAgents.length < requiredAgents) {
-        console.error(`Failed to create squad: Only selected ${selectedAgents.length}/${requiredAgents} agents.`);
-        // TODO: Handle failure
+        logger.error('Failed to create squad: insufficient agents', {
+          selected: selectedAgents.length,
+          required: requiredAgents
+        });
+        metrics.increment('squad_creation_failures');
         return;
     }
 
     const squadId = `squad-${Date.now()}-${Math.random().toString(16).substring(2, 8)}`;
-    console.log(`Spawning Squad Leader ${squadId}...`);
+    logger.info('Spawning Squad Leader', { squadId, mission: missionDescription });
 
     try {
         const leaderPath = SQUAD_LEADER_SCRIPT_PATH;
-        console.log(`Resolved Squad Leader Path for fork: ${leaderPath}`);
+        logger.debug('Resolved Squad Leader path for fork', { path: leaderPath });
 
         const squadProcess = fork(leaderPath, [], {
             stdio: 'pipe',
@@ -394,13 +500,14 @@ function createAndAssignSquad(missionDescription: string, taskDetails: object, r
         });
 
         squadProcess.stdout?.on('data', (data) => {
-            console.log(`[Squad ${squadId} STDOUT]: ${data.toString().trim()}`);
+            logger.debug('Squad stdout', { squadId, output: data.toString().trim() });
         });
         squadProcess.stderr?.on('data', (data) => {
-            console.error(`[Squad ${squadId} STDERR]: ${data.toString().trim()}`);
+            logger.error('Squad stderr', { squadId, output: data.toString().trim() });
         });
          squadProcess.on('error', (err) => {
-            console.error(`Squad ${squadId} process error:`, err);
+            logger.error('Squad process error', { squadId, error: err });
+            metrics.increment('squad_process_errors');
             const squad = activeSquads.get(squadId);
             if (squad) {
                 squad.agentIds.forEach(agentId => {
@@ -412,7 +519,7 @@ function createAndAssignSquad(missionDescription: string, taskDetails: object, r
              runStrategicPlanning({ type: 'squadSpawnError', squadId, error: err.message });
         });
         squadProcess.on('exit', (code, signal) => {
-             console.log(`Squad ${squadId} process exited with code ${code}, signal ${signal}`);
+             logger.info('Squad process exited', { squadId, code, signal });
              const squad = activeSquads.get(squadId);
              if (squad) {
                  squad.agentIds.forEach(agentId => {
@@ -423,8 +530,9 @@ function createAndAssignSquad(missionDescription: string, taskDetails: object, r
                      }
                  });
                  activeSquads.delete(squadId);
-                 console.log(`Cleaned up state for squad ${squadId}.`);
+                 logger.debug('Cleaned up state for squad', { squadId });
                  if (code !== 0) {
+                     metrics.increment('squad_unexpected_exits');
                      runStrategicPlanning({ type: 'squadUnexpectedExit', squadId, code, signal });
                  }
              }
@@ -448,10 +556,16 @@ function createAndAssignSquad(missionDescription: string, taskDetails: object, r
             }
         });
 
-        console.log(`Squad ${squadId} spawned (PID: ${squadProcess.pid}) and agents assigned.`);
+        logger.info('Squad spawned successfully', {
+          squadId,
+          pid: squadProcess.pid,
+          assignedAgents: selectedAgents.map(a => a.agentId)
+        });
+        metrics.increment('squads_created');
 
     } catch (error) {
-        console.error(`Error spawning squad leader process for ${squadId}:`, error);
+        logger.error('Error spawning squad leader process', { squadId, error });
+        metrics.increment('squad_spawn_errors');
          selectedAgents.forEach(agent => {
              const agentInfo = knownAgents.get(agent.agentId);
              if (agentInfo) { agentInfo.status = 'idle'; agentInfo.currentSquadId = undefined; }
@@ -465,16 +579,16 @@ function sendInitToSquadLeader(squadId: string, ws: WebSocket) {
      const agents = knownAgents;
 
      if (!squad) {
-         console.error(`Cannot send init to Squad ${squadId}: Squad not found.`);
+         logger.error('Cannot send init to Squad: Squad not found', { squadId });
          ws.close(1011, "Squad ID not recognized");
          return;
      }
      if (squad.ws) {
-         console.warn(`Squad ${squadId} already has a WebSocket connection. Ignoring new connection.`);
+         logger.warn('Squad already has a WebSocket connection, ignoring new connection', { squadId });
          return;
      }
 
-     console.log(`Squad Leader ${squadId} connected via WebSocket. Sending init...`);
+     logger.info('Squad Leader connected via WebSocket, sending init', { squadId });
      squad.ws = ws;
      squad.status = "Initializing";
 
@@ -487,13 +601,13 @@ function sendInitToSquadLeader(squadId: string, ws: WebSocket) {
              if (agent && agent.bsmAddress) {
                  return { agentId: agentId, bsmAddress: agent.bsmAddress };
              }
-             console.warn(`Agent ${agentId} or their BSM address not found for squad init.`);
+             logger.warn('Agent or BSM address not found for squad init', { agentId, squadId });
              return null;
          }).filter(a => a !== null) as { agentId: string; bsmAddress: string }[]
      };
 
      if (initPayload.assignedAgents.length !== squad.agentIds.length) {
-         console.error(`Error preparing init payload for Squad ${squadId}: Could not find BSM address for all assigned agents.`);
+         logger.error('Error preparing init payload for Squad: Could not find BSM address for all assigned agents', { squadId });
          terminateSquadLeader(squadId, "Failed to find BSM addresses for all agents");
          return;
      }
@@ -504,16 +618,17 @@ function sendInitToSquadLeader(squadId: string, ws: WebSocket) {
          senderId: 'orchestrator'
      };
      ws.send(JSON.stringify(message));
-     console.log(`Sent init to Squad ${squadId}`);
+     logger.debug('Sent init to Squad', { squadId, agentCount: initPayload.assignedAgents.length });
+     metrics.increment('squad_init_messages_sent');
 }
 
 function terminateSquadLeader(squadId: string, reason: string = "Mission ended") {
     const squad = activeSquads.get(squadId);
     if (!squad) {
-        console.warn(`Cannot terminate Squad ${squadId}: Not found.`);
+        logger.warn('Cannot terminate Squad: Not found', { squadId });
         return;
     }
-    console.log(`Terminating Squad Leader ${squadId}. Reason: ${reason}`);
+    logger.info('Terminating Squad Leader', { squadId, reason });
 
     if (squad.ws && squad.ws.readyState === WebSocket.OPEN) {
         try {
@@ -521,21 +636,21 @@ function terminateSquadLeader(squadId: string, reason: string = "Mission ended")
             squad.ws.send(JSON.stringify(message));
             squad.ws.close(1000, "Termination requested by Orchestrator");
         } catch (err) {
-            console.error(`Error sending terminate message to Squad ${squadId}:`, err);
+            logger.error('Error sending terminate message to Squad', { squadId, error: err });
         }
     } else {
-         console.warn(`Squad ${squadId} WS connection not open or available for sending terminate message.`);
+         logger.warn('Squad WS connection not open for sending terminate message', { squadId });
     }
 
     if (squad.process && !squad.process.killed) {
-        console.log(`Sending SIGTERM to Squad Leader process ${squad.process.pid}`);
+        logger.debug('Sending SIGTERM to Squad Leader process', { squadId, pid: squad.process.pid });
         const killed = squad.process.kill('SIGTERM');
         if (!killed) {
-             console.warn(`Failed to send SIGTERM to Squad Leader ${squadId} process ${squad.process.pid}.`);
+             logger.warn('Failed to send SIGTERM to Squad Leader process', { squadId, pid: squad.process.pid });
         }
         setTimeout(() => {
             if (squad.process && !squad.process.killed) {
-                console.warn(`Squad Leader ${squadId} did not terminate gracefully, sending SIGKILL.`);
+                logger.warn('Squad Leader did not terminate gracefully, sending SIGKILL', { squadId });
                 squad.process.kill('SIGKILL');
             }
         }, 5000);
@@ -549,13 +664,16 @@ function terminateSquadLeader(squadId: string, reason: string = "Mission ended")
         }
     });
     activeSquads.delete(squadId);
-    console.log(`Termination process initiated for Squad ${squadId}. State cleaned.`);
+    logger.debug('Termination process complete, state cleaned', { squadId });
+    metrics.increment('squads_terminated');
 }
 
 
 // --- World State Interface ---
 async function queryWorldState(query: object): Promise<any> {
-    console.log(`Querying World State Service:`, query);
+    logger.debug('Querying World State Service', { query });
+    const startTime = Date.now();
+
     try {
         const params = new URLSearchParams();
         Object.entries(query).forEach(([key, value]) => {
@@ -564,14 +682,26 @@ async function queryWorldState(query: object): Promise<any> {
 
         const response = await fetch(`${WORLD_STATE_API_ADDRESS}/query?${params.toString()}`);
         if (!response.ok) {
-            console.error(`Error querying World State: ${response.status} ${response.statusText}`);
+            logger.error('Error querying World State', {
+              status: response.status,
+              statusText: response.statusText
+            });
+            metrics.increment('world_state_query_errors');
             return null;
         }
         const results = await response.json();
-        console.log(`World State query returned ${results?.length ?? 0} results.`);
+        const duration = Date.now() - startTime;
+
+        logger.debug('World State query completed', {
+          resultCount: results?.length ?? 0,
+          durationMs: duration
+        });
+        metrics.record('world_state_query_duration', duration);
+        metrics.increment('world_state_queries_successful');
         return results;
     } catch (error) {
-        console.error('Fetch error querying World State:', error);
+        logger.error('Fetch error querying World State', { error });
+        metrics.increment('world_state_query_errors');
         return null;
     }
 }
@@ -579,25 +709,30 @@ async function queryWorldState(query: object): Promise<any> {
 
 // --- WebSocket Server ---
 const wss = new WebSocketServer({ port: WS_PORT });
-console.log(`Orchestrator WebSocket server listening on port ${WS_PORT}`);
+logger.info('Orchestrator WebSocket server started', { port: WS_PORT });
 
 wss.on('connection', (ws: WebSocket) => {
-    console.log('WS Client connected to Orchestrator');
+    logger.debug('WS Client connected to Orchestrator');
+    metrics.increment('ws_connections');
 
     ws.on('message', (message: Buffer) => {
         try {
             const parsedMessage: WebSocketMessage = JSON.parse(message.toString());
-            console.log(`Orchestrator received WS message type: ${parsedMessage.type} from ${parsedMessage.senderId}`);
+            logger.debug('Orchestrator received WS message', {
+              type: parsedMessage.type,
+              sender: parsedMessage.senderId
+            });
+            metrics.increment('ws_messages_received');
 
             // --- Handle BSM Registration ---
             if (parsedMessage.type === 'bsm::register') {
                 const { bsmId, address, capacity, agents } = parsedMessage.payload;
                 if (bsmId && address && agents && Array.isArray(agents)) {
-                    console.log(`BSM Registered: ${bsmId} at ${address} (Capacity: ${capacity || 'N/A'})`);
+                    logger.info(`BSM Registered: ${bsmId} at ${address} (Capacity: ${capacity || 'N/A'})`);
                     knownBSMs.set(bsmId, { address, ws });
                     agents.forEach((agentData: { agentId: string, status?: string }) => {
                         if (!knownAgents.has(agentData.agentId)) {
-                             console.log(`Registering new agent ${agentData.agentId} from BSM ${bsmId}`);
+                             logger.info(`Registering new agent ${agentData.agentId} from BSM ${bsmId}`);
                              knownAgents.set(agentData.agentId, {
                                  agentId: agentData.agentId,
                                  bsmAddress: address,
@@ -606,13 +741,13 @@ wss.on('connection', (ws: WebSocket) => {
                                  lastKnownLocation: undefined
                              });
                         } else {
-                             console.log(`Agent ${agentData.agentId} already known.`);
+                             logger.info(`Agent ${agentData.agentId} already known.`);
                              const agent = knownAgents.get(agentData.agentId);
                              if (agent) agent.bsmAddress = address;
                         }
                     });
                 } else {
-                     console.error('Invalid bsm::register message payload:', parsedMessage.payload);
+                     logger.error('Invalid bsm::register message payload:', parsedMessage.payload);
                 }
             }
             // --- Handle Squad Leader Registration ---
@@ -621,7 +756,7 @@ wss.on('connection', (ws: WebSocket) => {
                  if (squadId && activeSquads.has(squadId)) {
                      sendInitToSquadLeader(squadId, ws);
                  } else {
-                     console.error(`Received registration from unknown or inactive Squad ID: ${squadId}`);
+                     logger.error(`Received registration from unknown or inactive Squad ID: ${squadId}`);
                      ws.close(1008, "Unknown Squad ID");
                  }
             }
@@ -630,29 +765,29 @@ wss.on('connection', (ws: WebSocket) => {
                 const { squadId, status, progress, details } = parsedMessage.payload;
                 const squad = activeSquads.get(squadId);
                 if (squad) {
-                    console.log(`Status update from Squad ${squadId}: ${status} (${(progress * 100).toFixed(1)}%)`);
+                    logger.info(`Status update from Squad ${squadId}: ${status} (${(progress * 100).toFixed(1)}%)`);
                     squad.status = status;
                 } else {
-                     console.warn(`Received status update for unknown squad: ${squadId}`);
+                     logger.warn(`Received status update for unknown squad: ${squadId}`);
                 }
             } else if (parsedMessage.type === 'squadLeader::missionComplete') {
                  const { squadId, results } = parsedMessage.payload;
-                 console.log(`Mission complete for Squad ${squadId}:`, results);
+                 logger.info(`Mission complete for Squad ${squadId}:`, results);
                  terminateSquadLeader(squadId, "Mission Complete");
                  runStrategicPlanning({ type: 'missionComplete', squadId, results });
             } else if (parsedMessage.type === 'squadLeader::missionFailed') {
                  const { squadId, reason } = parsedMessage.payload;
-                 console.log(`Mission failed for Squad ${squadId}: ${reason}`);
+                 logger.info(`Mission failed for Squad ${squadId}: ${reason}`);
                  terminateSquadLeader(squadId, `Mission Failed: ${reason}`);
 
                  // --- Nuanced Event Detection (Task 3.1) ---
                  const currentFailures = (squadFailureCounts.get(squadId) || 0) + 1;
                  squadFailureCounts.set(squadId, currentFailures);
-                 console.log(`Squad ${squadId} failure count: ${currentFailures}`);
+                 logger.info(`Squad ${squadId} failure count: ${currentFailures}`);
 
                  const failureEvent: any = { type: 'missionFailed', squadId, reason };
                  if (currentFailures >= SQUAD_FAILURE_THRESHOLD) {
-                     console.warn(`Squad ${squadId} has failed ${currentFailures} times (>= threshold ${SQUAD_FAILURE_THRESHOLD}). Triggering specific re-plan.`);
+                     logger.warn(`Squad ${squadId} has failed ${currentFailures} times (>= threshold ${SQUAD_FAILURE_THRESHOLD}). Triggering specific re-plan.`);
                      failureEvent.type = 'repeatedSquadFailure'; // Modify event type
                      // Optionally reset count after triggering special re-plan
                      // squadFailureCounts.delete(squadId);
@@ -662,13 +797,13 @@ wss.on('connection', (ws: WebSocket) => {
 
             } else if (parsedMessage.type === 'squadLeader::reportStrategicFind') {
                  const { squadId, findingDetails } = parsedMessage.payload;
-                 console.log(`Strategic find reported by Squad ${squadId}:`, findingDetails);
+                 logger.info(`Strategic find reported by Squad ${squadId}:`, findingDetails);
                  runStrategicPlanning({ type: 'strategicFind', squadId, findingDetails });
             }
              // --- Handle Agent Lost ---
              else if (parsedMessage.type === 'squadLeader::agentLost') {
                  const { squadId, agentId, reason } = parsedMessage.payload;
-                 console.warn(`Agent ${agentId} lost from Squad ${squadId}. Reason: ${reason}`);
+                 logger.warn(`Agent ${agentId} lost from Squad ${squadId}. Reason: ${reason}`);
                  const agent = knownAgents.get(agentId);
                  if (agent) {
                      agent.status = 'unknown';
@@ -678,21 +813,21 @@ wss.on('connection', (ws: WebSocket) => {
              }
             // --- Handle Frontend Registration/Commands ---
             else if (parsedMessage.type === 'frontend::register') {
-                console.log('Frontend client registered.');
+                logger.info('Frontend client registered.');
                 connectedFrontendClients.add(ws);
             } else if (parsedMessage.type === 'frontend::startGoal') {
                  const { goal } = parsedMessage.payload;
-                 console.log(`Received start goal from frontend: ${goal}`);
+                 logger.info(`Received start goal from frontend: ${goal}`);
                  runStrategicPlanning({ type: 'startGoal', goal });
             }
 
         } catch (error) {
-            console.error('Failed to parse Orchestrator WS message or handle:', error);
+            logger.error('Failed to parse Orchestrator WS message or handle:', error);
         }
     });
 
     ws.on('close', () => {
-        console.log('WS Client disconnected from Orchestrator');
+        logger.info('WS Client disconnected from Orchestrator');
         connectedFrontendClients.delete(ws);
         let disconnectedId: string | null = null;
         let disconnectedType: 'bsm' | 'squad' | null = null;
@@ -705,14 +840,14 @@ wss.on('connection', (ws: WebSocket) => {
             }
         }
         if (disconnectedId && disconnectedType === 'bsm') {
-             console.log(`BSM ${disconnectedId} disconnected.`);
+             logger.info(`BSM ${disconnectedId} disconnected.`);
              const bsmAddress = knownBSMs.get(disconnectedId)?.address; // Get address before deleting
              knownBSMs.delete(disconnectedId);
              // Mark agents associated with this BSM as unknown
              knownAgents.forEach(agent => {
                  if (agent.bsmAddress === bsmAddress) {
                      agent.status = 'unknown';
-                     console.log(`Marked agent ${agent.agentId} as unknown due to BSM disconnect.`);
+                     logger.info(`Marked agent ${agent.agentId} as unknown due to BSM disconnect.`);
                  }
              });
         } else {
@@ -720,7 +855,7 @@ wss.on('connection', (ws: WebSocket) => {
                  if (squad.ws === ws) {
                      disconnectedId = id;
                      disconnectedType = 'squad';
-                     console.warn(`Squad Leader ${id} disconnected unexpectedly.`);
+                     logger.warn(`Squad Leader ${id} disconnected unexpectedly.`);
                      squad.ws = null;
                      break;
                  }
@@ -729,7 +864,7 @@ wss.on('connection', (ws: WebSocket) => {
     });
 
     ws.on('error', (error: Error) => {
-        console.error('Orchestrator WebSocket error:', error);
+        logger.error('Orchestrator WebSocket error:', error);
          connectedFrontendClients.delete(ws);
          let disconnectedId: string | null = null;
          for (const [id, bsm] of knownBSMs.entries()) {
@@ -742,33 +877,109 @@ wss.on('connection', (ws: WebSocket) => {
     });
 });
 
-// --- Placeholder HTTP Server ---
-const server = http.createServer((req, res) => {
+// --- Health Check Setup ---
+const healthCheck = new HealthCheck('orchestrator-service', '0.1.0');
+
+healthCheck.registerDependency('world-state-service', async () => {
+    try {
+        const response = await fetch(`${WORLD_STATE_API_ADDRESS}/health`, { signal: AbortSignal.timeout(5000) });
+        if (response.ok) {
+            return { status: 'connected' };
+        }
+        return { status: 'disconnected', error: 'World State unhealthy' };
+    } catch (error) {
+        return { status: 'disconnected', error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+});
+
+healthCheck.registerDependency('gemini-api', async () => {
+    // Check circuit breaker state
+    const cbState = geminiCircuitBreaker.getState();
+    if (cbState === 'open') {
+        return { status: 'degraded', error: 'Circuit breaker open' };
+    }
+    return { status: 'connected' };
+});
+
+// --- HTTP Server with Health and Metrics Endpoints ---
+const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url || '/', `http://${req.headers.host}`);
+
+    // Health check endpoint
+    if (url.pathname === '/health' && req.method === 'GET') {
+        try {
+            const health = await healthCheck.check();
+            const statusCode = health.status === 'healthy' ? 200 : health.status === 'degraded' ? 200 : 503;
+            res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(health));
+        } catch (error) {
+            logger.error('Health check failed', { error });
+            res.writeHead(503, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                service: 'orchestrator-service',
+                status: 'unhealthy',
+                error: error instanceof Error ? error.message : 'Unknown error'
+            }));
+        }
+        return;
+    }
+
+    // Metrics endpoint
+    if (url.pathname === '/metrics' && req.method === 'GET') {
+        const allMetrics = metrics.getAllMetrics();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(allMetrics));
+        return;
+    }
+
+    // Status endpoint (default)
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'Orchestrator Running', knownBSMs: knownBSMs.size, knownAgents: knownAgents.size, activeSquads: activeSquads.size }));
+    res.end(JSON.stringify({
+        status: 'Orchestrator Running',
+        knownBSMs: knownBSMs.size,
+        knownAgents: knownAgents.size,
+        activeSquads: activeSquads.size
+    }));
 });
 
 server.listen(PORT, () => {
-    console.log(`Orchestrator placeholder HTTP server listening on port ${PORT}`);
+    logger.info('Orchestrator HTTP server listening', {
+      port: PORT,
+      endpoints: ['/health', '/metrics', '/']
+    });
 });
 
 
 // --- Initial Startup ---
-console.log("Orchestrator started. Waiting for connections...");
+logger.info("Orchestrator started. Waiting for connections...");
 
 
 // --- Graceful Shutdown ---
-function shutdown() {
-    console.log('Shutting down Orchestrator...');
-    wss.close(() => console.log('Orchestrator WebSocket server closed.'));
-    server.close(() => console.log('Orchestrator HTTP server closed.'));
-    console.log('Terminating active squad leaders...');
-    activeSquads.forEach((squad, squadId) => {
-        terminateSquadLeader(squadId, "Orchestrator shutting down");
-    });
-    console.log("Orchestrator shutdown complete.");
-    setTimeout(() => process.exit(0), 2000);
-}
+const shutdown = createGracefulShutdown(logger);
 
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);
+shutdown.register(async () => {
+    logger.info('Closing WebSocket server...');
+    wss.close();
+});
+
+shutdown.register(async () => {
+    logger.info('Closing HTTP server...');
+    return new Promise<void>((resolve) => {
+        server.close(() => {
+            logger.info('HTTP server closed');
+            resolve();
+        });
+    });
+});
+
+shutdown.register(async () => {
+    logger.info('Terminating all active squad leaders...');
+    const squadTerminations = Array.from(activeSquads.keys()).map(squadId => {
+        return new Promise<void>((resolve) => {
+            terminateSquadLeader(squadId, "Orchestrator shutting down");
+            resolve();
+        });
+    });
+    await Promise.all(squadTerminations);
+    logger.info('All squad leaders terminated');
+});
