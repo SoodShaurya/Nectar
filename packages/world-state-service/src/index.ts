@@ -18,6 +18,7 @@ import {
 import POI from './models/poi';
 import ResourceNode from './models/resourceNode';
 import Infrastructure from './models/infrastructure';
+import Goal from './models/goal';
 
 // --- Initialize Logger ---
 const logger = createLogger('world-state-service');
@@ -32,8 +33,46 @@ logger.info('Starting World State Service', {
 });
 
 const POI_DEDUPLICATION_RADIUS = 10; // meters
+const POI_DEDUPLICATION_Y_THRESHOLD = 10; // Y-coordinate threshold for dedup
 const RESOURCE_DEDUPLICATION_RADIUS = 5; // meters
 const INFRA_DEDUPLICATION_RADIUS = 15; // meters
+const DEFAULT_QUERY_LIMIT = 100; // Default limit for queries
+
+// --- Payload Validation ---
+function validateCoords(coords: any): coords is { x: number; y: number; z: number } {
+    return coords &&
+        typeof coords.x === 'number' &&
+        typeof coords.y === 'number' &&
+        typeof coords.z === 'number';
+}
+
+function validateReportPayload(report: any): string | null {
+    if (!report || !report.dataType || !report.data) {
+        return 'Missing dataType or data';
+    }
+    if (!report.reporterAgentId || typeof report.reporterAgentId !== 'string') {
+        return 'Missing or invalid reporterAgentId';
+    }
+
+    switch (report.dataType) {
+        case 'poi':
+            if (!report.data.type || typeof report.data.type !== 'string') return 'POI: missing or invalid type';
+            if (!validateCoords(report.data.coords)) return 'POI: missing or invalid coords';
+            break;
+        case 'resourceNode':
+            if (!report.data.resourceType || typeof report.data.resourceType !== 'string') return 'ResourceNode: missing or invalid resourceType';
+            if (!validateCoords(report.data.coords)) return 'ResourceNode: missing or invalid coords';
+            break;
+        case 'infrastructure':
+            if (!report.data.type || typeof report.data.type !== 'string') return 'Infrastructure: missing or invalid type';
+            if (!report.data.name || typeof report.data.name !== 'string') return 'Infrastructure: missing or invalid name';
+            if (!validateCoords(report.data.coords)) return 'Infrastructure: missing or invalid coords';
+            break;
+        default:
+            return `Unknown dataType: ${report.dataType}`;
+    }
+    return null; // Valid
+}
 
 // --- Express App Setup ---
 const app = express();
@@ -97,23 +136,38 @@ app.get('/metrics', (req: Request, res: Response) => {
 // POST /report - Accepts reports from BSMs (originating from Agents)
 app.post('/report', async (req: Request, res: Response, next: NextFunction) => {
   const startTime = Date.now();
-  const report = req.body as WorldStateReportPayload;
+  const report = req.body;
+
+  // Validate payload
+  const validationError = validateReportPayload(report);
+  if (validationError) {
+    logger.warn('Rejected invalid report', { error: validationError, body: report });
+    metrics.increment('report_validation_errors');
+    return res.status(400).json({ message: `Validation failed: ${validationError}` });
+  }
+
+  const typedReport = report as WorldStateReportPayload;
 
   logger.debug('Received report', {
-    dataType: report.dataType,
-    agentId: report.reporterAgentId
+    dataType: typedReport.dataType,
+    agentId: typedReport.reporterAgentId
   });
 
   try {
-    switch (report.dataType) {
+    switch (typedReport.dataType) {
       case 'poi': {
+        // Include Y-coordinate in dedup to avoid false positives in tall structures
         const existingPOI = await POI.findOne({
-          type: report.data.type,
+          type: typedReport.data.type,
+          'coords.y': {
+            $gte: typedReport.data.coords.y - POI_DEDUPLICATION_Y_THRESHOLD,
+            $lte: typedReport.data.coords.y + POI_DEDUPLICATION_Y_THRESHOLD
+          },
           coords: {
             $nearSphere: {
               $geometry: {
                 type: "Point",
-                coordinates: [report.data.coords.x, report.data.coords.z]
+                coordinates: [typedReport.data.coords.x, typedReport.data.coords.z]
               },
               $maxDistance: POI_DEDUPLICATION_RADIUS
             }
@@ -122,15 +176,15 @@ app.post('/report', async (req: Request, res: Response, next: NextFunction) => {
 
         if (existingPOI) {
           logger.debug('Duplicate POI found, skipping', {
-            type: report.data.type,
-            coords: report.data.coords
+            type: typedReport.data.type,
+            coords: typedReport.data.coords
           });
           metrics.increment('poi_duplicates');
         } else {
-          await POI.create(report.data);
+          await POI.create(typedReport.data);
           logger.info('New POI stored', {
-            type: report.data.type,
-            coords: report.data.coords
+            type: typedReport.data.type,
+            coords: typedReport.data.coords
           });
           metrics.increment('poi_created');
         }
@@ -139,13 +193,13 @@ app.post('/report', async (req: Request, res: Response, next: NextFunction) => {
 
       case 'resourceNode': {
         const existingResource = await ResourceNode.findOne({
-          resourceType: report.data.resourceType,
+          resourceType: typedReport.data.resourceType,
           depleted: false,
           coords: {
             $nearSphere: {
               $geometry: {
                 type: "Point",
-                coordinates: [report.data.coords.x, report.data.coords.z]
+                coordinates: [typedReport.data.coords.x, typedReport.data.coords.z]
               },
               $maxDistance: RESOURCE_DEDUPLICATION_RADIUS
             }
@@ -154,15 +208,15 @@ app.post('/report', async (req: Request, res: Response, next: NextFunction) => {
 
         if (existingResource) {
           logger.debug('Duplicate ResourceNode found, skipping', {
-            type: report.data.resourceType,
-            coords: report.data.coords
+            type: typedReport.data.resourceType,
+            coords: typedReport.data.coords
           });
           metrics.increment('resource_duplicates');
         } else {
-          await ResourceNode.create(report.data);
+          await ResourceNode.create(typedReport.data);
           logger.info('New ResourceNode stored', {
-            type: report.data.resourceType,
-            coords: report.data.coords
+            type: typedReport.data.resourceType,
+            coords: typedReport.data.coords
           });
           metrics.increment('resource_created');
         }
@@ -170,25 +224,21 @@ app.post('/report', async (req: Request, res: Response, next: NextFunction) => {
       }
 
       case 'infrastructure': {
-        await Infrastructure.create(report.data);
+        await Infrastructure.create(typedReport.data);
         logger.info('Infrastructure stored', {
-          type: report.data.type,
-          name: report.data.name
+          type: typedReport.data.type,
+          name: typedReport.data.name
         });
         metrics.increment('infrastructure_created');
         break;
       }
-
-      default:
-        logger.warn('Unknown report dataType', { dataType: (report as any).dataType });
-        return res.status(400).json({ message: 'Invalid report type' });
     }
 
     metrics.record('report_processing_time', Date.now() - startTime);
     metrics.increment('reports_processed');
     res.status(201).json({ message: 'Report received and processed' });
   } catch (error) {
-    logger.error('Error processing report', { error, report });
+    logger.error('Error processing report', { error, report: typedReport });
     metrics.increment('report_errors');
     next(error);
   }
@@ -234,20 +284,20 @@ app.get('/query', async (req: Request, res: Response, next: NextFunction) => {
     let results: any[] = [];
     let query;
 
+    // Apply default limit if none specified
+    const effectiveLimit = queryLimit > 0 ? queryLimit : DEFAULT_QUERY_LIMIT;
+
     switch (type) {
       case 'poi':
-        query = POI.find(queryFilter);
-        if (queryLimit > 0) query = query.limit(queryLimit);
+        query = POI.find(queryFilter).limit(effectiveLimit);
         results = await query.exec();
         break;
       case 'resourceNode':
-        query = ResourceNode.find(queryFilter);
-        if (queryLimit > 0) query = query.limit(queryLimit);
+        query = ResourceNode.find(queryFilter).limit(effectiveLimit);
         results = await query.exec();
         break;
       case 'infrastructure':
-        query = Infrastructure.find(queryFilter);
-        if (queryLimit > 0) query = query.limit(queryLimit);
+        query = Infrastructure.find(queryFilter).limit(effectiveLimit);
         results = await query.exec();
         break;
       default:
@@ -266,6 +316,91 @@ app.get('/query', async (req: Request, res: Response, next: NextFunction) => {
   } catch (error) {
     logger.error('Error processing query', { error, type });
     metrics.increment('query_errors');
+    next(error);
+  }
+});
+
+// --- Goal CRUD Endpoints ---
+
+// POST /goals - Create a new goal
+app.post('/goals', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { goalId, type, description, priority, assignedAgents, state, parentGoal } = req.body;
+    if (!goalId || !type || !description) {
+      return res.status(400).json({ message: 'Missing required fields: goalId, type, description' });
+    }
+    const goal = await Goal.create({
+      goalId, type, description,
+      priority: priority ?? 'medium',
+      status: 'active',
+      assignedAgents: assignedAgents ?? [],
+      state: state ?? {},
+      parentGoal,
+    });
+    metrics.increment('goals_created');
+    res.status(201).json(goal);
+  } catch (error: any) {
+    if (error.code === 11000) {
+      return res.status(409).json({ message: `Goal ${req.body.goalId} already exists` });
+    }
+    next(error);
+  }
+});
+
+// GET /goals - List goals (optionally filter by status)
+app.get('/goals', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const filter: any = {};
+    if (req.query.status) filter.status = req.query.status;
+    if (req.query.type) filter.type = req.query.type;
+    if (req.query.parentGoal) filter.parentGoal = req.query.parentGoal;
+    const goals = await Goal.find(filter).sort({ priority: 1, createdAt: -1 }).limit(50);
+    res.status(200).json(goals);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /goals/:goalId - Get a specific goal
+app.get('/goals/:goalId', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const goal = await Goal.findOne({ goalId: req.params.goalId });
+    if (!goal) return res.status(404).json({ message: 'Goal not found' });
+    res.status(200).json(goal);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// PATCH /goals/:goalId - Update a goal
+app.patch('/goals/:goalId', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const allowedUpdates = ['description', 'priority', 'status', 'assignedAgents', 'state'];
+    const updates: any = {};
+    for (const key of allowedUpdates) {
+      if (req.body[key] !== undefined) updates[key] = req.body[key];
+    }
+    const goal = await Goal.findOneAndUpdate(
+      { goalId: req.params.goalId },
+      { $set: updates },
+      { new: true }
+    );
+    if (!goal) return res.status(404).json({ message: 'Goal not found' });
+    metrics.increment('goals_updated');
+    res.status(200).json(goal);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// DELETE /goals/:goalId - Delete a goal
+app.delete('/goals/:goalId', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const result = await Goal.findOneAndDelete({ goalId: req.params.goalId });
+    if (!result) return res.status(404).json({ message: 'Goal not found' });
+    metrics.increment('goals_deleted');
+    res.status(200).json({ message: 'Goal deleted' });
+  } catch (error) {
     next(error);
   }
 });

@@ -179,7 +179,7 @@ wss.on('connection', (ws: WebSocket) => {
 
             // --- Message Routing (WS -> Agent) ---
             if (parsedMessage.type === 'squadLeader::agentCommand' || parsedMessage.type === 'orchestrator::agentCommand') {
-                const { agentId, taskId, task } = parsedMessage.payload;
+                const { agentId, taskId, task, completionCondition } = parsedMessage.payload;
                 const agent = managedAgents.get(agentId);
 
                 if (agent && agent.localSocket && agent.status === 'running') {
@@ -189,9 +189,9 @@ wss.on('connection', (ws: WebSocket) => {
                         logger.info(`Assigning commander ${clientInfo.id} to agent ${agentId}`);
                         agent.commanderId = clientInfo.id;
                     }
-                    // Forward the command payload over TCP to the specific agent
-                    const messageToSend = JSON.stringify({ type: 'command', payload: { taskId, task } });
-                    agent.localSocket.write(messageToSend + '\n'); // Add newline as delimiter
+                    // Forward the command payload over TCP to the specific agent (include completionCondition)
+                    const messageToSend = JSON.stringify({ type: 'command', payload: { taskId, task, completionCondition } });
+                    agent.localSocket.write(messageToSend + '\n');
                 } else {
                     logger.warn(`Cannot route command to agent ${agentId}: Agent not found, not connected via TCP, or not running.`);
                     // TODO: Send error back to commander?
@@ -210,6 +210,33 @@ wss.on('connection', (ws: WebSocket) => {
                  } else {
                       logger.error('orchestrator::terminateAgent message missing agentId');
                  }
+            } else if (parsedMessage.type === 'orchestrator::updateProfile') {
+                const { agentId, profile } = parsedMessage.payload;
+                const agent = managedAgents.get(agentId);
+                if (agent && agent.localSocket && agent.status === 'running') {
+                    logger.info(`Routing profile update to Agent ${agentId}`);
+                    agent.localSocket.write(JSON.stringify({ type: 'updateProfile', payload: profile }) + '\n');
+                } else {
+                    logger.warn(`Cannot route profile update to agent ${agentId}: Agent not found or not running.`);
+                }
+            } else if (parsedMessage.type === 'orchestrator::cancelTask') {
+                const { agentId, taskId } = parsedMessage.payload;
+                const agent = managedAgents.get(agentId);
+                if (agent && agent.localSocket && agent.status === 'running') {
+                    logger.info(`Routing cancelTask to Agent ${agentId} (task: ${taskId})`);
+                    agent.localSocket.write(JSON.stringify({ type: 'cancelTask', payload: { taskId } }) + '\n');
+                } else {
+                    logger.warn(`Cannot route cancelTask to agent ${agentId}: Agent not found or not running.`);
+                }
+            } else if (parsedMessage.type === 'orchestrator::chatMessage') {
+                const { agentId, message: chatMsg } = parsedMessage.payload;
+                const agent = managedAgents.get(agentId);
+                if (agent && agent.localSocket && agent.status === 'running') {
+                    logger.info(`Routing chat message to Agent ${agentId}`);
+                    agent.localSocket.write(JSON.stringify({ type: 'chatMessage', payload: { message: chatMsg } }) + '\n');
+                } else {
+                    logger.warn(`Cannot route chat message to agent ${agentId}: Agent not found or not running.`);
+                }
             }
             // Add handlers for other WS message types if needed
 

@@ -26,6 +26,16 @@ export type TaskType =
   | "ManageContainer"
   | "NavigateTo";
 
+// --- Completion Conditions ---
+export type CompletionCondition =
+  | { type: 'inventory_has'; item: string; count: number }
+  | { type: 'at_position'; position: Coordinates; radius: number }
+  | { type: 'time_elapsed'; seconds: number }
+  | { type: 'entity_eliminated'; entityType: string; radius: number }
+  | { type: 'structure_found'; structureType: string }
+  | { type: 'area_cleared'; radius: number }
+  | { type: 'indefinite' };
+
 // Using a union type for details based on the task type
 export type TaskDetails =
   | GatherDetails
@@ -144,7 +154,9 @@ export type AgentEventType =
   | "statusUpdate" // Generic status change
   | "taskRejected" // If agent cannot perform task
   | "agentLostConnection" // Added for Squad Leader error handling
-  | "commandSendFailed"; // Added for Squad Leader error handling
+  | "commandSendFailed" // Added for Squad Leader error handling
+  | "playerChat" // Player said something in Minecraft chat
+  | "behaviorAlert"; // Behavior layer preemption alert
 
 export type AgentEventDetails =
   | TaskCompleteDetails
@@ -156,7 +168,9 @@ export type AgentEventDetails =
   | TookDamageDetails
   | InventoryUpdateDetails
   | StatusUpdateDetails
-  | TaskRejectedDetails;
+  | TaskRejectedDetails
+  | PlayerChatDetails
+  | BehaviorAlertDetails;
 
 // --- Specific Event Detail Interfaces ---
 
@@ -215,6 +229,16 @@ export interface StatusUpdateDetails {
 
 export interface TaskRejectedDetails {
     reason: string; // e.g., "Missing materials", "Invalid target"
+}
+
+export interface PlayerChatDetails {
+    playerName: string;
+    message: string;
+}
+
+export interface BehaviorAlertDetails {
+    alertType: string; // e.g., "health_low", "player_detected", "agent_death"
+    [key: string]: any; // alert-specific payload
 }
 
 
@@ -328,6 +352,7 @@ export interface AgentCommandObject {
     agentId: string;
     taskId: string; // Unique ID for this specific command instance
     task: TaskObject;
+    completionCondition?: CompletionCondition;
 }
 // --- Utility Exports ---
 export * from './logger';
