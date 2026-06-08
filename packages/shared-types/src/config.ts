@@ -7,6 +7,13 @@ const numberFromString = (defaultValue: string) =>
 // Coordinator Configuration Schema (replaces the former orchestrator + squad leader tiers)
 export const coordinatorConfigSchema = z.object({
   DEEPSEEK_API_KEY: z.string().min(1, 'DEEPSEEK_API_KEY is required'),
+  // Which DeepSeek model the coordinator reasons with. Restricted to v4 variants
+  // (e.g. deepseek-v4-pro for deepest planning, deepseek-v4-flash for ~2x lower
+  // latency). Flip without a code change.
+  COORDINATOR_MODEL: z
+    .string()
+    .regex(/^deepseek-v4-/, 'COORDINATOR_MODEL must be a deepseek-v4-* variant')
+    .default('deepseek-v4-flash'),
   // Kept optional for back-compat; no longer used now that the coordinator runs on DeepSeek.
   GEMINI_API_KEY: z.string().min(1).optional(),
   COORDINATOR_PORT: numberFromString('5000'),

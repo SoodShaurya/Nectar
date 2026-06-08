@@ -46,6 +46,7 @@ const llm = new CoordinatorLLM(
   worldState,
   goalBoard,
   config.MC_VERSION,
+  config.COORDINATOR_MODEL,
 );
 
 // AgentManager surfaces lifecycle changes that require the LLM to re-evaluate

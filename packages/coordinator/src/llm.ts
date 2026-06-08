@@ -1,5 +1,7 @@
 /**
- * Conversational Coordinator LLM — DeepSeek (v4-pro) with function calling.
+ * Conversational Coordinator LLM — DeepSeek (v4 family) with function calling.
+ * Model is configurable via COORDINATOR_MODEL (deepseek-v4-flash default,
+ * deepseek-v4-pro for deepest planning).
  *
  * Event-driven agent that manages a goal board, assigns tasks to agents with
  * completion conditions, converses with players, and uses the task tree resolver
@@ -21,7 +23,7 @@ import { COORDINATOR_TOOLS } from './llm-tools';
 import { executeTool, ToolContext } from './llm-executor';
 
 const logger = createLogger('coordinator:llm');
-const MODEL = 'deepseek-v4-pro';
+const DEFAULT_MODEL = 'deepseek-v4-flash';
 const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 const MAX_TURNS_PER_INVOCATION = 10;
 
@@ -33,6 +35,7 @@ export class CoordinatorLLM {
   private worldState: WorldStateClient;
   private goalBoard: GoalBoard;
   private mcVersion: string;
+  private model: string;
 
   private circuitBreaker: CircuitBreaker;
   private rateLimiter: RateLimiter;
@@ -52,12 +55,14 @@ export class CoordinatorLLM {
     worldState: WorldStateClient,
     goalBoard: GoalBoard,
     mcVersion: string,
+    model: string = DEFAULT_MODEL,
   ) {
     this.client = new OpenAI({ apiKey, baseURL: DEEPSEEK_BASE_URL });
     this.agents = agents;
     this.worldState = worldState;
     this.goalBoard = goalBoard;
     this.mcVersion = mcVersion;
+    this.model = model;
 
     initRecipes(mcVersion);
 
@@ -68,7 +73,7 @@ export class CoordinatorLLM {
     });
     this.rateLimiter = new RateLimiter({ maxCalls: 60, windowMs: 60000 });
 
-    logger.info('Conversational coordinator initialized', { model: MODEL });
+    logger.info('Conversational coordinator initialized', { model: this.model });
   }
 
   getCircuitBreakerState(): string {
@@ -141,7 +146,7 @@ export class CoordinatorLLM {
         const response = await metrics.measureAsync('llm_coordinator_call', async () => {
           return await this.circuitBreaker.execute(async () => {
             return await this.client.chat.completions.create({
-              model: MODEL,
+              model: this.model,
               messages: [
                 { role: 'system', content: SYSTEM_PROMPT },
                 ...this.conversationHistory,
