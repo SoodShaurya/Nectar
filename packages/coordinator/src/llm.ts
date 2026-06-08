@@ -69,15 +69,59 @@ export class CoordinatorLLM {
     this.circuitBreaker = new CircuitBreaker('deepseek-api', {
       failureThreshold: 5,
       resetTimeout: 60000,
+      // Per-call timeout well above observed worst-case reasoning latency (~60s)
+      // so a slow-but-successful turn is not miscounted as a failure and the
+      // breaker doesn't trip open on legitimate slow reasoning.
+      timeout: 120000,
       onStateChange: (state) => logger.warn('DeepSeek circuit breaker state changed', { state }),
     });
-    this.rateLimiter = new RateLimiter({ maxCalls: 60, windowMs: 60000 });
+    // throwOnLimit:false so waitIfNeeded() actually sleeps until a slot frees
+    // (matching its name) instead of throwing and aborting an invocation
+    // mid-plan after tool side effects have already dispatched.
+    this.rateLimiter = new RateLimiter({ maxCalls: 60, windowMs: 60000, throwOnLimit: false });
 
     logger.info('Conversational coordinator initialized', { model: this.model });
   }
 
   getCircuitBreakerState(): string {
     return this.circuitBreaker.getState();
+  }
+
+  /**
+   * Append an assistant message to history with `reasoning_content` stripped.
+   * DeepSeek ignores reasoning_content on input, but keeping it re-uploads
+   * 150-350 tokens/turn and crowds the retained window. content + tool_calls
+   * are preserved (tool_calls are required to match subsequent 'tool' messages).
+   */
+  private pushAssistantMessage(message: any): void {
+    const { reasoning_content, ...clean } = message ?? {};
+    this.conversationHistory.push(clean);
+  }
+
+  /**
+   * Enqueue an event that arrived while an invocation was in flight. Bounded and
+   * coalescing so a slow invocation under a burst can't grow the queue without
+   * limit or replay redundant work:
+   *  - Agent lifecycle events (replan/taskRejected/taskComplete/taskFailed) are
+   *    deduped by agentId — only the latest per agent survives.
+   *  - Total length is capped (oldest dropped) as a memory backstop.
+   * (periodic/stall never reach here: the supervisor skips invoking while busy.)
+   */
+  private enqueuePendingEvent(event: any): void {
+    const COALESCE = new Set(['replan', 'taskRejected', 'taskComplete', 'taskFailed']);
+    const MAX_PENDING = 50;
+    if (event?.type && COALESCE.has(event.type) && event.agentId) {
+      this.pendingEvents = this.pendingEvents.filter(
+        (e) => !(e?.type === event.type && e?.agentId === event.agentId),
+      );
+    }
+    this.pendingEvents.push(event);
+    if (this.pendingEvents.length > MAX_PENDING) {
+      const dropped = this.pendingEvents.shift();
+      logger.warn('Pending event queue full — dropped oldest', { droppedType: dropped?.type });
+      metrics.increment('coordinator_pending_dropped');
+    }
+    logger.debug('Coordinator busy, event queued', { queueSize: this.pendingEvents.length });
   }
 
   /** Whether an invocation is currently in flight (so the supervisor doesn't pile on). */
@@ -97,8 +141,7 @@ export class CoordinatorLLM {
     this.lastInvokeAt = Date.now();
 
     if (this.isRunning) {
-      this.pendingEvents.push(triggeringEvent);
-      logger.debug('Coordinator busy, event queued', { queueSize: this.pendingEvents.length });
+      this.enqueuePendingEvent(triggeringEvent);
       return;
     }
 
@@ -153,6 +196,10 @@ export class CoordinatorLLM {
               ],
               tools: COORDINATOR_TOOLS,
               tool_choice: 'auto',
+              // Cap any single response so a runaway/looping reasoning_content
+              // (a known reasoning-model failure mode) can't stream unbounded;
+              // normal turns use only 150-350 reasoning tokens.
+              max_tokens: 4096,
             });
           });
         });
@@ -174,9 +221,10 @@ export class CoordinatorLLM {
         if (toolCalls && toolCalls.length > 0) {
           metrics.increment('llm_function_calls', toolCalls.length);
 
-          // Append the assistant message verbatim — it carries the tool_calls
-          // that the subsequent 'tool' messages must answer (matched by id).
-          this.conversationHistory.push(message);
+          // Append the assistant message — it carries the tool_calls that the
+          // subsequent 'tool' messages must answer (matched by id). reasoning_content
+          // is stripped (DeepSeek ignores it on input; keeping it wastes tokens).
+          this.pushAssistantMessage(message);
 
           // Execute tool calls and append one 'tool' message per result.
           const ctx = this.buildToolContext();
@@ -236,14 +284,41 @@ export class CoordinatorLLM {
             });
           }
 
-          // Add the model's final response to history.
-          this.conversationHistory.push(message);
+          // Add the model's final response to history (reasoning_content stripped).
+          this.pushAssistantMessage(message);
           break;
         }
       }
 
+      // If we exhausted the turn budget while the model still had pending tool
+      // calls, the conversation ends on 'tool' results with no assistant synthesis
+      // (a half-executed plan). Surface it, then force one final tool-free turn so
+      // the model reacts to the last tool batch and history ends on an assistant turn.
       if (turns >= MAX_TURNS_PER_INVOCATION) {
-        logger.warn('Coordinator hit max turns limit');
+        const last = this.conversationHistory[this.conversationHistory.length - 1];
+        if (last?.role === 'tool') {
+          logger.error('Coordinator hit max turns mid-plan — forcing final synthesis', {
+            eventType: triggeringEvent?.type,
+          });
+          metrics.increment('coordinator_max_turns_truncated');
+          try {
+            await this.rateLimiter.waitIfNeeded();
+            const final = await this.circuitBreaker.execute(async () =>
+              this.client.chat.completions.create({
+                model: this.model,
+                messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...this.conversationHistory],
+                tool_choice: 'none',
+                max_tokens: 1024,
+              }),
+            );
+            const fm = final?.choices?.[0]?.message;
+            if (fm) this.pushAssistantMessage(fm);
+          } catch (err) {
+            logger.error('Final synthesis turn failed', { error: err instanceof Error ? err.message : String(err) });
+          }
+        } else {
+          logger.warn('Coordinator hit max turns limit');
+        }
       }
 
       metrics.record('coordinator_invocation_duration', Date.now() - startTime);

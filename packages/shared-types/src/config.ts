@@ -14,8 +14,6 @@ export const coordinatorConfigSchema = z.object({
     .string()
     .regex(/^deepseek-v4-/, 'COORDINATOR_MODEL must be a deepseek-v4-* variant')
     .default('deepseek-v4-flash'),
-  // Kept optional for back-compat; no longer used now that the coordinator runs on DeepSeek.
-  GEMINI_API_KEY: z.string().min(1).optional(),
   COORDINATOR_PORT: numberFromString('5000'),
   COORDINATOR_WS_PORT: numberFromString('5001'),
   WORLD_STATE_API_ADDRESS: z.string().url().default('http://localhost:3000'),

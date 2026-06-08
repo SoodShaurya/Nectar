@@ -12,7 +12,6 @@
   "license": "MIT",
   "dependencies": {
     "@aetherius/shared-types": "workspace:*",
-    "@google/genai": "^1.0.0",
     "minecraft-data": "^3.110.2",
     "openai": "^6.42.0",
     "ws": "^8.18.0"

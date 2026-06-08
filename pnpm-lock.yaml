@@ -147,9 +147,6 @@ importers:
       '@aetherius/shared-types':
         specifier: workspace:*
         version: link:../shared-types
-      '@google/genai':
-        specifier: ^1.0.0
-        version: 1.48.0
       minecraft-data:
         specifier: ^3.110.2
         version: 3.110.2
