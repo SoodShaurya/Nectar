@@ -34,7 +34,7 @@ export class NavigationModule extends BaseModule {
       cfg.placeBlocks = true;  // pillar/scaffold up to elevated targets (needs blocks in inventory)
       cfg.parkour = true;
       if ('swimming' in cfg) cfg.swimming = true;
-      cfg.thinkTimeout = 20000;
+      cfg.thinkTimeout = 5000; // fail fast on hard paths instead of grinding
     }
   }
 

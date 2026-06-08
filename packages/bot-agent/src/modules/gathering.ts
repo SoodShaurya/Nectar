@@ -89,47 +89,30 @@ export class GatheringModule extends BaseModule {
    * remain nearby or the timeout elapses.
    */
   private async collectNearbyDrops(center: any, signal: AbortSignal): Promise<void> {
-    // Walk ONTO the break location first (tolerance 1 = within pickup range;
-    // the default tolerance of 2 parks the bot just outside it). Items
-    // auto-collect on proximity and the drop is usually right where the block was.
-    if (this.navigationModule) {
-      await this.navigationModule.navigateTo({ x: center.x, y: center.y, z: center.z }, signal, 1);
-      await this.sleep(250);
-    }
-
-    // One-shot diagnostic: what entities are actually near a fresh break?
-    if (!this.dropDiagDone) {
-      this.dropDiagDone = true;
-      const near = Object.values(this.bot.entities)
-        .filter((e: any) => e?.position && center.distanceTo(e.position) <= DROP_SEARCH_RADIUS)
-        .map((e: any) => e.name);
-      logger.info(`[diag] entities within ${DROP_SEARCH_RADIUS} of break: ${JSON.stringify(near)}`);
-    }
-
     const deadline = Date.now() + COLLECT_TIMEOUT_MS;
+    // Give the drop a tick to spawn after the break.
+    await this.sleep(300);
+
     while (Date.now() < deadline) {
       if (this.isAborted(signal)) return;
 
       const drop = this.bot.nearestEntity(
         (e: any) => this.isItemEntity(e) && e.position && center.distanceTo(e.position) <= DROP_SEARCH_RADIUS,
       );
-      if (!drop) {
-        // The drop entity may not have spawned yet right after the break.
-        await this.sleep(250);
-        const retry = this.bot.nearestEntity(
-          (e: any) => this.isItemEntity(e) && e.position && center.distanceTo(e.position) <= DROP_SEARCH_RADIUS,
-        );
-        if (!retry) return;
+      if (!drop) return; // nothing (more) to collect nearby
+
+      const dist = this.bot.entity.position.distanceTo(drop.position);
+      if (dist <= 1.4) {
+        // Already in pickup range — just wait for the server to register it.
+        await this.sleep(300);
         continue;
       }
-
+      // Walk onto the drop (tolerance 1 = within pickup range).
       if (this.navigationModule) {
         await this.navigationModule.navigateTo(
-          { x: drop.position.x, y: drop.position.y, z: drop.position.z },
-          signal, 1,
+          { x: drop.position.x, y: drop.position.y, z: drop.position.z }, signal, 1,
         );
       }
-      // Give the server a tick to register the pickup.
       await this.sleep(300);
     }
   }
@@ -201,19 +184,21 @@ export class GatheringModule extends BaseModule {
       const block = this.bot.blockAt(chosen);
       if (!block) { failed.add(posKey); consecutiveFailures++; continue; }
 
-      // Navigate to the block. A nav failure is not fatal — mark it failed (so we
-      // don't re-pick it) and try another. Short timeout so an unreachable/buried
-      // block doesn't burn 60s.
-      if (!this.navigationModule) return this.fail('Navigation module not available');
-      const reached = await this.navigationModule.navigateTo(
-        { x: block.position.x, y: block.position.y, z: block.position.z }, signal, 2,
-      );
-      if (this.isAborted(signal)) return;
-      if (!reached) {
-        logger.warn(`Could not reach ${blockName} at ${block.position}; skipping`);
-        failed.add(posKey);
-        consecutiveFailures++;
-        continue;
+      // Only navigate if the block isn't ALREADY within dig reach — otherwise we'd
+      // waste seconds pathfinding to a block we can dig from where we stand. A nav
+      // failure is not fatal: mark it failed (so we don't re-pick it) and try another.
+      if (!this.bot.canDigBlock(block)) {
+        if (!this.navigationModule) return this.fail('Navigation module not available');
+        const reached = await this.navigationModule.navigateTo(
+          { x: block.position.x, y: block.position.y, z: block.position.z }, signal, 2,
+        );
+        if (this.isAborted(signal)) return;
+        if (!reached || !this.bot.canDigBlock(block)) {
+          logger.warn(`Could not reach ${blockName} at ${block.position}; skipping`);
+          failed.add(posKey);
+          consecutiveFailures++;
+          continue;
+        }
       }
 
       // Equip the best tool. If we can't (and the block needs one to drop), skip
