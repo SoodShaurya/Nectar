@@ -38,6 +38,11 @@ const RESOURCE_DEDUPLICATION_RADIUS = 5; // meters
 const INFRA_DEDUPLICATION_RADIUS = 15; // meters
 const DEFAULT_QUERY_LIMIT = 100; // Default limit for queries
 
+// POI types that represent distinct, position-precise objects (e.g. containers).
+// These must be deduped by EXACT coordinates so two chests in the same storage
+// room aren't collapsed into one by the 10m radius dedup.
+const POI_EXACT_DEDUP_TYPES = new Set(['chest', 'container', 'barrel', 'shulker_box', 'hopper', 'dispenser', 'dropper', 'furnace']);
+
 // --- Payload Validation ---
 function validateCoords(coords: any): coords is { x: number; y: number; z: number } {
     return coords &&
@@ -156,32 +161,58 @@ app.post('/report', async (req: Request, res: Response, next: NextFunction) => {
   try {
     switch (typedReport.dataType) {
       case 'poi': {
-        // Include Y-coordinate in dedup to avoid false positives in tall structures
-        const existingPOI = await POI.findOne({
-          type: typedReport.data.type,
-          'coords.y': {
-            $gte: typedReport.data.coords.y - POI_DEDUPLICATION_Y_THRESHOLD,
-            $lte: typedReport.data.coords.y + POI_DEDUPLICATION_Y_THRESHOLD
-          },
-          coords: {
-            $nearSphere: {
-              $geometry: {
-                type: "Point",
-                coordinates: [typedReport.data.coords.x, typedReport.data.coords.z]
-              },
-              $maxDistance: POI_DEDUPLICATION_RADIUS
+        const isExactType = POI_EXACT_DEDUP_TYPES.has(typedReport.data.type.toLowerCase());
+
+        // Containers (chests, etc.) are position-precise: dedup by EXACT coords so
+        // distinct chests in a storage room are tracked separately. Other POI types
+        // (caves, villages, etc.) use the 10m radius + Y-band dedup.
+        const dedupFilter = isExactType
+          ? {
+              type: typedReport.data.type,
+              'coords.x': typedReport.data.coords.x,
+              'coords.y': typedReport.data.coords.y,
+              'coords.z': typedReport.data.coords.z
             }
-          }
-        });
+          : {
+              type: typedReport.data.type,
+              'coords.y': {
+                $gte: typedReport.data.coords.y - POI_DEDUPLICATION_Y_THRESHOLD,
+                $lte: typedReport.data.coords.y + POI_DEDUPLICATION_Y_THRESHOLD
+              },
+              coords: {
+                $nearSphere: {
+                  $geometry: {
+                    type: "Point",
+                    coordinates: [typedReport.data.coords.x, typedReport.data.coords.z]
+                  },
+                  $maxDistance: POI_DEDUPLICATION_RADIUS
+                }
+              }
+            };
+
+        const existingPOI = await POI.findOne(dedupFilter);
 
         if (existingPOI) {
-          logger.debug('Duplicate POI found, skipping', {
+          // Upsert: refresh the existing POI with the latest report so that
+          // mutable data (e.g. chest details.contents) does not go stale.
+          existingPOI.details = typedReport.data.details ?? existingPOI.details;
+          if (typedReport.data.name !== undefined) existingPOI.name = typedReport.data.name;
+          if (typedReport.data.biome !== undefined) existingPOI.biome = typedReport.data.biome;
+          existingPOI.reporterAgentId = typedReport.reporterAgentId;
+          existingPOI.lastUpdated = new Date();
+          await existingPOI.save();
+          logger.info('Existing POI updated', {
             type: typedReport.data.type,
-            coords: typedReport.data.coords
+            coords: typedReport.data.coords,
+            exact: isExactType
           });
-          metrics.increment('poi_duplicates');
+          metrics.increment('poi_updated');
         } else {
-          await POI.create(typedReport.data);
+          await POI.create({
+            ...typedReport.data,
+            reporterAgentId: typedReport.reporterAgentId,
+            lastUpdated: new Date()
+          });
           logger.info('New POI stored', {
             type: typedReport.data.type,
             coords: typedReport.data.coords
