@@ -40,7 +40,7 @@ const agents = new AgentManager();
 const worldState = new WorldStateClient(config.WORLD_STATE_API_ADDRESS);
 const goalBoard = new GoalBoard(config.WORLD_STATE_API_ADDRESS);
 const llm = new CoordinatorLLM(
-  config.GEMINI_API_KEY,
+  config.DEEPSEEK_API_KEY,
   agents,
   worldState,
   goalBoard,
@@ -216,7 +216,7 @@ healthCheck.registerDependency('world-state-service', async () => {
   return await worldState.healthCheck();
 });
 
-healthCheck.registerDependency('gemini-api', async () => {
+healthCheck.registerDependency('deepseek-api', async () => {
   const state = llm.getCircuitBreakerState();
   if (state === 'open') {
     return { status: 'degraded' as const, error: 'Circuit breaker open' };

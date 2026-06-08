@@ -1,138 +1,173 @@
 /**
- * Coordinator LLM function-declaration definitions (pure data).
+ * Coordinator LLM tool definitions (pure data), in OpenAI tool-calling format.
  *
- * Extracted from llm.ts. The CoordinatorLLM class imports COORDINATOR_TOOLS and
- * passes it to the model as `tools: [{ functionDeclarations: COORDINATOR_TOOLS }]`.
+ * The CoordinatorLLM class imports COORDINATOR_TOOLS and passes it to the model
+ * as `tools: COORDINATOR_TOOLS` on chat.completions.create. Each entry follows
+ * the OpenAI shape: { type: 'function', function: { name, description, parameters } }
+ * where `parameters` is a JSON Schema object.
  */
 
-import { Type } from '@google/genai';
+import type { ChatCompletionTool } from 'openai/resources/chat/completions';
 
 // --- Tool Definitions ---
-export const COORDINATOR_TOOLS = [
+export const COORDINATOR_TOOLS: ChatCompletionTool[] = [
   {
-    name: 'assignTask',
-    description: 'Assign a module task to an idle agent with optional completion condition and behavior profile.',
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        agentId: { type: Type.STRING, description: 'ID of the idle agent.' },
-        taskType: { type: Type.STRING, description: 'Task type: Gather, Craft, Smelt, NavigateTo, Explore, Guard, Attack, Build, PlaceBlock, ManageContainer, Transport.' },
-        taskDetails: { type: Type.OBJECT, description: 'Module-specific parameters.', properties: {} },
-        completionCondition: { type: Type.OBJECT, description: 'Optional completion condition. Omit for module-default completion.', properties: {} },
-        behaviorProfile: { type: Type.STRING, description: 'Optional profile preset: "cautious", "balanced", "aggressive".' },
+    type: 'function',
+    function: {
+      name: 'assignTask',
+      description: 'Assign a module task to an idle agent with optional completion condition and behavior profile.',
+      parameters: {
+        type: 'object',
+        properties: {
+          agentId: { type: 'string', description: 'ID of the idle agent.' },
+          taskType: { type: 'string', description: 'Task type: Gather, Craft, Smelt, NavigateTo, Explore, Guard, Attack, Build, PlaceBlock, ManageContainer, Transport.' },
+          taskDetails: { type: 'object', description: 'Module-specific parameters.', properties: {} },
+          completionCondition: { type: 'object', description: 'Optional completion condition. Omit for module-default completion.', properties: {} },
+          behaviorProfile: { type: 'string', description: 'Optional profile preset: "cautious", "balanced", "aggressive".' },
+        },
+        required: ['agentId', 'taskType', 'taskDetails'],
       },
-      required: ['agentId', 'taskType', 'taskDetails'],
     },
   },
   {
-    name: 'cancelTask',
-    description: 'Cancel an agent\'s current task. Agent becomes idle.',
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        agentId: { type: Type.STRING, description: 'Agent to cancel.' },
+    type: 'function',
+    function: {
+      name: 'cancelTask',
+      description: 'Cancel an agent\'s current task. Agent becomes idle.',
+      parameters: {
+        type: 'object',
+        properties: {
+          agentId: { type: 'string', description: 'Agent to cancel.' },
+        },
+        required: ['agentId'],
       },
-      required: ['agentId'],
     },
   },
   {
-    name: 'updateAgentProfile',
-    description: 'Update an agent\'s behavior profile without changing its current task.',
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        agentId: { type: Type.STRING, description: 'Agent to update.' },
-        profile: { type: Type.STRING, description: 'Profile preset: "cautious", "balanced", "aggressive".' },
+    type: 'function',
+    function: {
+      name: 'updateAgentProfile',
+      description: 'Update an agent\'s behavior profile without changing its current task.',
+      parameters: {
+        type: 'object',
+        properties: {
+          agentId: { type: 'string', description: 'Agent to update.' },
+          profile: { type: 'string', description: 'Profile preset: "cautious", "balanced", "aggressive".' },
+        },
+        required: ['agentId', 'profile'],
       },
-      required: ['agentId', 'profile'],
     },
   },
   {
-    name: 'resolveTaskTree',
-    description: 'Resolve an item\'s crafting dependency tree. Returns ordered task list pruned against current inventories. Use for acquisition goals ONLY.',
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        item: { type: Type.STRING, description: 'Item name (e.g., "diamond_pickaxe").' },
-        count: { type: Type.NUMBER, description: 'How many to obtain.' },
+    type: 'function',
+    function: {
+      name: 'resolveTaskTree',
+      description: 'Resolve an item\'s crafting dependency tree. Returns ordered task list pruned against current inventories. Use for acquisition goals ONLY.',
+      parameters: {
+        type: 'object',
+        properties: {
+          item: { type: 'string', description: 'Item name (e.g., "diamond_pickaxe").' },
+          count: { type: 'number', description: 'How many to obtain.' },
+        },
+        required: ['item', 'count'],
       },
-      required: ['item', 'count'],
     },
   },
   {
-    name: 'queryWorldState',
-    description: 'Query the world state database for POIs, resources, storage contents, or infrastructure.',
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        query: { type: Type.OBJECT, description: 'Query params: {type: "poi"|"resourceNode"|"infrastructure", filter: {...}, options: {limit: N}}', properties: {} },
+    type: 'function',
+    function: {
+      name: 'queryWorldState',
+      description: 'Query the world state database for POIs, resources, storage contents, or infrastructure.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'object', description: 'Query params: {type: "poi"|"resourceNode"|"infrastructure", filter: {...}, options: {limit: N}}', properties: {} },
+        },
+        required: ['query'],
       },
-      required: ['query'],
     },
   },
   {
-    name: 'createGoal',
-    description: 'Create a new goal on the goal board.',
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        description: { type: Type.STRING, description: 'What the goal is (e.g., "Obtain full netherite armor").' },
-        type: { type: Type.STRING, description: 'Goal type: acquisition, persistent, construction, exploration, social, composite.' },
-        priority: { type: Type.STRING, description: 'Priority: critical, high, medium, low.' },
+    type: 'function',
+    function: {
+      name: 'createGoal',
+      description: 'Create a new goal on the goal board.',
+      parameters: {
+        type: 'object',
+        properties: {
+          description: { type: 'string', description: 'What the goal is (e.g., "Obtain full netherite armor").' },
+          type: { type: 'string', description: 'Goal type: acquisition, persistent, construction, exploration, social, composite.' },
+          priority: { type: 'string', description: 'Priority: critical, high, medium, low.' },
+        },
+        required: ['description', 'type', 'priority'],
       },
-      required: ['description', 'type', 'priority'],
     },
   },
   {
-    name: 'updateGoal',
-    description: 'Update a goal\'s priority, assignedAgents, or state.',
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        goalId: { type: Type.STRING, description: 'Goal ID to update.' },
-        priority: { type: Type.STRING, description: 'New priority.' },
-        assignedAgents: { type: Type.ARRAY, description: 'Agent IDs assigned to this goal.', items: { type: Type.STRING } },
-        state: { type: Type.OBJECT, description: 'Goal-specific state update.', properties: {} },
+    type: 'function',
+    function: {
+      name: 'updateGoal',
+      description: 'Update a goal\'s priority, assignedAgents, or state.',
+      parameters: {
+        type: 'object',
+        properties: {
+          goalId: { type: 'string', description: 'Goal ID to update.' },
+          priority: { type: 'string', description: 'New priority.' },
+          assignedAgents: { type: 'array', description: 'Agent IDs assigned to this goal.', items: { type: 'string' } },
+          state: { type: 'object', description: 'Goal-specific state update.', properties: {} },
+        },
+        required: ['goalId'],
       },
-      required: ['goalId'],
     },
   },
   {
-    name: 'completeGoal',
-    description: 'Mark a goal as completed.',
-    parameters: {
-      type: Type.OBJECT,
-      properties: { goalId: { type: Type.STRING } },
-      required: ['goalId'],
-    },
-  },
-  {
-    name: 'pauseGoal',
-    description: 'Pause a goal. Agents on only this goal become idle.',
-    parameters: {
-      type: Type.OBJECT,
-      properties: { goalId: { type: Type.STRING } },
-      required: ['goalId'],
-    },
-  },
-  {
-    name: 'resumeGoal',
-    description: 'Resume a paused goal.',
-    parameters: {
-      type: Type.OBJECT,
-      properties: { goalId: { type: Type.STRING } },
-      required: ['goalId'],
-    },
-  },
-  {
-    name: 'messagePlayer',
-    description: 'Send a chat message to the Minecraft server. The message appears in-game.',
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        message: { type: Type.STRING, description: 'The chat message to send.' },
+    type: 'function',
+    function: {
+      name: 'completeGoal',
+      description: 'Mark a goal as completed.',
+      parameters: {
+        type: 'object',
+        properties: { goalId: { type: 'string' } },
+        required: ['goalId'],
       },
-      required: ['message'],
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'pauseGoal',
+      description: 'Pause a goal. Agents on only this goal become idle.',
+      parameters: {
+        type: 'object',
+        properties: { goalId: { type: 'string' } },
+        required: ['goalId'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'resumeGoal',
+      description: 'Resume a paused goal.',
+      parameters: {
+        type: 'object',
+        properties: { goalId: { type: 'string' } },
+        required: ['goalId'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'messagePlayer',
+      description: 'Send a chat message to the Minecraft server. The message appears in-game.',
+      parameters: {
+        type: 'object',
+        properties: {
+          message: { type: 'string', description: 'The chat message to send.' },
+        },
+        required: ['message'],
+      },
     },
   },
 ];

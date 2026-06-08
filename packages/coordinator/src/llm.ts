@@ -1,12 +1,16 @@
 /**
- * Conversational Coordinator LLM — Gemini 3 Flash with function calling.
+ * Conversational Coordinator LLM — DeepSeek (v4-pro) with function calling.
  *
  * Event-driven agent that manages a goal board, assigns tasks to agents with
  * completion conditions, converses with players, and uses the task tree resolver
  * as one tool among many.
+ *
+ * DeepSeek is OpenAI-compatible: we talk to it via the `openai` SDK pointed at
+ * the DeepSeek base URL, using OpenAI-format chat messages and tool calling.
  */
 
-import { GoogleGenAI, ThinkingLevel } from '@google/genai';
+import OpenAI from 'openai';
+import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions';
 import { createLogger, metrics, CircuitBreaker, RateLimiter } from '@aetherius/shared-types';
 import { AgentManager } from './agents';
 import { WorldStateClient } from './world-state';
@@ -17,13 +21,14 @@ import { COORDINATOR_TOOLS } from './llm-tools';
 import { executeTool, ToolContext } from './llm-executor';
 
 const logger = createLogger('coordinator:llm');
-const MODEL = 'gemini-3-flash-preview';
+const MODEL = 'deepseek-v4-pro';
+const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 const MAX_TURNS_PER_INVOCATION = 10;
 
 // --- Coordinator LLM Class ---
 
 export class CoordinatorLLM {
-  private genAI: GoogleGenAI;
+  private client: OpenAI;
   private agents: AgentManager;
   private worldState: WorldStateClient;
   private goalBoard: GoalBoard;
@@ -31,7 +36,9 @@ export class CoordinatorLLM {
 
   private circuitBreaker: CircuitBreaker;
   private rateLimiter: RateLimiter;
-  private conversationHistory: Array<{ role: string; parts: any[] }> = [];
+  // OpenAI-format chat history (user / assistant / tool messages). The system
+  // prompt is prepended fresh on every request and is NOT stored here.
+  private conversationHistory: ChatCompletionMessageParam[] = [];
 
   private isRunning = false;
   private pendingEvents: any[] = [];
@@ -43,7 +50,7 @@ export class CoordinatorLLM {
     goalBoard: GoalBoard,
     mcVersion: string,
   ) {
-    this.genAI = new GoogleGenAI({ apiKey });
+    this.client = new OpenAI({ apiKey, baseURL: DEEPSEEK_BASE_URL });
     this.agents = agents;
     this.worldState = worldState;
     this.goalBoard = goalBoard;
@@ -51,10 +58,10 @@ export class CoordinatorLLM {
 
     initRecipes(mcVersion);
 
-    this.circuitBreaker = new CircuitBreaker('gemini-api', {
+    this.circuitBreaker = new CircuitBreaker('deepseek-api', {
       failureThreshold: 5,
       resetTimeout: 60000,
-      onStateChange: (state) => logger.warn('Gemini circuit breaker state changed', { state }),
+      onStateChange: (state) => logger.warn('DeepSeek circuit breaker state changed', { state }),
     });
     this.rateLimiter = new RateLimiter({ maxCalls: 60, windowMs: 60000 });
 
@@ -95,11 +102,16 @@ export class CoordinatorLLM {
 
       // Build user message
       const userMessage = this.buildContextMessage(triggeringEvent, agentSummary, worldSummary, goalSummary);
-      this.conversationHistory.push({ role: 'user', parts: [{ text: userMessage }] });
+      this.conversationHistory.push({ role: 'user', content: userMessage });
 
-      // Prune history to last 20 turns
+      // Prune history to last 20 messages. Guard against orphaning a 'tool'
+      // message at the front (a 'tool' role must be preceded by the assistant
+      // message that requested it, or the API rejects the request).
       if (this.conversationHistory.length > 40) {
         this.conversationHistory = this.conversationHistory.slice(-20);
+        while (this.conversationHistory.length > 0 && this.conversationHistory[0].role === 'tool') {
+          this.conversationHistory.shift();
+        }
       }
 
       // Multi-turn tool use loop
@@ -111,57 +123,99 @@ export class CoordinatorLLM {
 
         const response = await metrics.measureAsync('llm_coordinator_call', async () => {
           return await this.circuitBreaker.execute(async () => {
-            return await this.genAI.models.generateContent({
+            return await this.client.chat.completions.create({
               model: MODEL,
-              contents: this.conversationHistory as any,
-              config: {
-                systemInstruction: SYSTEM_PROMPT,
-                tools: [{ functionDeclarations: COORDINATOR_TOOLS as any }],
-                thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
-              },
+              messages: [
+                { role: 'system', content: SYSTEM_PROMPT },
+                ...this.conversationHistory,
+              ],
+              tools: COORDINATOR_TOOLS,
+              tool_choice: 'auto',
             });
           });
         });
 
         if (!response) {
-          logger.error('Null response from Gemini');
+          logger.error('Null response from DeepSeek');
           break;
         }
 
-        const functionCalls = response.functionCalls;
+        const choice = response.choices?.[0];
+        const message = choice?.message;
+        if (!message) {
+          logger.error('DeepSeek response had no choices/message');
+          break;
+        }
 
-        if (functionCalls && functionCalls.length > 0) {
-          metrics.increment('llm_function_calls', functionCalls.length);
+        const toolCalls = message.tool_calls;
 
-          // Add model response to history (preserves thought signatures)
-          if (response.candidates?.[0]?.content) {
-            this.conversationHistory.push(response.candidates[0].content as any);
-          }
+        if (toolCalls && toolCalls.length > 0) {
+          metrics.increment('llm_function_calls', toolCalls.length);
 
-          // Execute function calls
+          // Append the assistant message verbatim — it carries the tool_calls
+          // that the subsequent 'tool' messages must answer (matched by id).
+          this.conversationHistory.push(message);
+
+          // Execute tool calls and append one 'tool' message per result.
           const ctx = this.buildToolContext();
-          const functionResponseParts: any[] = [];
-          for (const call of functionCalls) {
-            const result = await executeTool(call.name!, call.args, ctx);
-            functionResponseParts.push({
-              functionResponse: { name: call.name, response: result, id: call.id },
+          for (const call of toolCalls) {
+            // DeepSeek/OpenAI may emit non-function tool calls in theory; guard.
+            if (call.type !== 'function') {
+              logger.warn('Ignoring non-function tool call', { type: (call as any).type, id: call.id });
+              this.conversationHistory.push({
+                role: 'tool',
+                tool_call_id: call.id,
+                content: JSON.stringify({ error: 'Unsupported tool call type' }),
+              });
+              continue;
+            }
+
+            const name = call.function.name;
+            let args: any = {};
+            try {
+              args = call.function.arguments ? JSON.parse(call.function.arguments) : {};
+            } catch (err) {
+              logger.warn('Failed to parse tool call arguments JSON', {
+                name,
+                arguments: call.function.arguments,
+                error: err instanceof Error ? err.message : String(err),
+              });
+              this.conversationHistory.push({
+                role: 'tool',
+                tool_call_id: call.id,
+                content: JSON.stringify({ error: 'Invalid tool arguments JSON' }),
+              });
+              continue;
+            }
+
+            const result = await executeTool(name, args, ctx);
+            this.conversationHistory.push({
+              role: 'tool',
+              tool_call_id: call.id,
+              content: JSON.stringify(result ?? null),
             });
           }
 
-          // Add responses to history
-          this.conversationHistory.push({ role: 'user', parts: functionResponseParts });
-
           await this.rateLimiter.waitIfNeeded();
         } else {
-          // No function calls — final text response
-          const text = response.text;
+          // No tool calls — final text response.
+          const text = typeof message.content === 'string' ? message.content : '';
           if (text) {
             logger.info('Coordinator reasoning complete', { preview: text.substring(0, 200) });
           }
-          // Add model's final response to history
-          if (response.candidates?.[0]?.content) {
-            this.conversationHistory.push(response.candidates[0].content as any);
+
+          // DEFENSIVE: some models leak a tool invocation into message.content as
+          // text while reporting finish_reason 'stop'. We can't reliably execute
+          // a malformed call, so log it and end the turn gracefully rather than
+          // crash or loop.
+          if (choice?.finish_reason === 'stop' && /"?(tool_call|function)"?\s*[:=]/i.test(text)) {
+            logger.warn('Possible tool call leaked into assistant content; ending turn', {
+              preview: text.substring(0, 300),
+            });
           }
+
+          // Add the model's final response to history.
+          this.conversationHistory.push(message);
           break;
         }
       }
