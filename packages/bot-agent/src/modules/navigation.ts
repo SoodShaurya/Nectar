@@ -1,9 +1,9 @@
 import { BaseModule } from './base';
 import { ModuleContext } from '../types';
 import { Coordinates, createLogger } from '@aetherius/shared-types';
-import { pathfinder, Movements, goals } from 'mineflayer-pathfinder';
+import { loader as baritoneLoader, goals as bGoals } from '@miner-org/mineflayer-baritone';
+import { Vec3 } from 'vec3';
 
-const { GoalNear, GoalXZ } = goals;
 const logger = createLogger('bot-agent:navigation');
 
 export interface NavigationParams {
@@ -13,43 +13,34 @@ export interface NavigationParams {
 
 export class NavigationModule extends BaseModule {
   readonly name = 'navigation';
-  private movements: Movements | null = null;
+  private mcData: any = null;
 
   constructor(ctx: ModuleContext) {
     super(ctx);
   }
 
   initialize(): void {
-    // Load the pathfinder plugin if not already loaded
-    if (!(this.bot as any).pathfinder) {
-      this.bot.loadPlugin(pathfinder);
+    this.mcData = require('minecraft-data')(this.bot.version);
+
+    // Use mineflayer-baritone (bot.ashfinder) — a stronger pathfinder with its
+    // own physics that can break/place blocks to dig through and pillar up to
+    // elevated targets, swim, parkour, and self-recover (replan) when stuck.
+    if (!(this.bot as any).ashfinder) {
+      this.bot.loadPlugin(baritoneLoader);
     }
-
-    // Create movements with bot's registry
-    this.movements = new Movements(this.bot);
-    this.movements.canDig = true;
-    this.movements.allowSprinting = true;
-    this.movements.allow1by1towers = true;
-    this.movements.allowParkour = true;
-    (this.movements as any).maxDropDown = 4;
-
-    (this.bot as any).pathfinder.setMovements(this.movements);
-
-    // Listen to pathfinder events for diagnostics
-    this.bot.on('path_reset' as any, (reason: string) => {
-      logger.info(`Path reset: ${reason}`);
-    });
-    this.bot.on('goal_reached' as any, () => {
-      logger.debug('Goal reached');
-    });
-    this.bot.on('path_stop' as any, () => {
-      logger.debug('Path stopped');
-    });
+    const cfg = (this.bot as any).ashfinder?.config;
+    if (cfg) {
+      cfg.breakBlocks = true;  // dig through obstacles to reach the goal
+      cfg.placeBlocks = true;  // pillar/scaffold up to elevated targets (needs blocks in inventory)
+      cfg.parkour = true;
+      if ('swimming' in cfg) cfg.swimming = true;
+      cfg.thinkTimeout = 20000;
+    }
   }
 
   protected async run(params: NavigationParams, signal: AbortSignal): Promise<void> {
     const { destination, tolerance } = params;
-    if (!(this.bot as any).pathfinder) {
+    if (!(this.bot as any).ashfinder) {
       return this.fail('Pathfinder plugin not available');
     }
 
@@ -65,80 +56,169 @@ export class NavigationModule extends BaseModule {
     }
   }
 
-  /** Public navigateTo for use by other modules. Use ignoreY for exploration-style goals. */
-  async navigateTo(coords: Coordinates, signal?: AbortSignal, tolerance: number = 2, ignoreY: boolean = false): Promise<boolean> {
-    const pf = (this.bot as any).pathfinder;
-    if (!pf) return false;
+  /**
+   * Public navigateTo for use by other modules. Use ignoreY for exploration-style goals.
+   *
+   * Backed by mineflayer-baritone (bot.ashfinder). We race the goto() against a
+   * generous wall-clock backstop and the abort signal, cancelling via
+   * ashfinder.stop(). Resolves false instead of throwing.
+   */
+  async navigateTo(coords: Coordinates, signal?: AbortSignal, tolerance: number = 2, ignoreY: boolean = false, timeoutMs: number = 60000): Promise<boolean> {
+    const af = (this.bot as any).ashfinder;
+    if (!af) return false;
 
-    // Guard against NaN position
     const pos = this.bot.entity.position;
     if (isNaN(pos.x) || isNaN(pos.y) || isNaN(pos.z)) {
       logger.error('Bot position is NaN, cannot navigate');
       return false;
     }
 
-    const goal = ignoreY
-      ? new GoalXZ(coords.x, coords.z)
-      : new GoalNear(coords.x, coords.y, coords.z, tolerance);
+    const v = new Vec3(Math.floor(coords.x), Math.floor(coords.y), Math.floor(coords.z));
+    const goal = ignoreY ? new bGoals.GoalXZ(v) : new bGoals.GoalNear(v, tolerance);
+
+    // baritone throws if a goto is already running — make sure we're idle first.
+    if (!af.stopped) { try { af.stop(); } catch { /* ignore */ } }
+
+    const cancel = () => { try { af.stop(); } catch { /* ignore */ } };
+    let backstop: NodeJS.Timeout | null = null;
+    let abortHandler: (() => void) | null = null;
 
     try {
-      const gotoPromise = pf.goto(goal);
+      const gotoP = Promise.resolve(af.goto(goal)).then(() => true).catch((err: any) => {
+        logger.warn(`ashfinder error: ${err?.message ?? err}`);
+        return false;
+      });
 
+      const backstopP = new Promise<boolean>((resolve) => {
+        backstop = setTimeout(() => {
+          logger.warn(`Navigation backstop hit after ${Math.round(timeoutMs / 1000)}s; cancelling`);
+          cancel();
+          resolve(false);
+        }, timeoutMs);
+      });
+
+      const racers: Promise<boolean>[] = [gotoP, backstopP];
       if (signal) {
-        const result = await Promise.race([
-          gotoPromise.then(() => true).catch((err: any) => {
-            // 'GoalChanged' and 'PathStopped' are expected when we cancel
-            if (err?.name === 'GoalChanged' || err?.name === 'PathStopped') return false;
-            logger.error('Pathfinder error:', err?.message ?? err);
-            return false;
-          }),
-          new Promise<boolean>((resolve) => {
-            signal.addEventListener('abort', () => {
-              pf.stop();
-              resolve(false);
-            }, { once: true });
-          }),
-          new Promise<boolean>((resolve) => {
-            setTimeout(() => {
-              logger.warn('Navigation timed out after 60 seconds');
-              pf.stop();
-              resolve(false);
-            }, 60000);
-          }),
-        ]);
-        return result;
+        if (signal.aborted) { cancel(); return false; }
+        racers.push(new Promise<boolean>((resolve) => {
+          abortHandler = () => { cancel(); resolve(false); };
+          signal.addEventListener('abort', abortHandler, { once: true });
+        }));
       }
 
-      // No signal path
-      await Promise.race([
-        gotoPromise,
-        new Promise<void>((_, reject) => {
-          setTimeout(() => {
-            logger.warn('Navigation timed out after 60 seconds');
-            pf.stop();
-            reject(new Error('Navigation timed out'));
-          }, 60000);
-        }),
-      ]);
-      return true;
-    } catch (err: any) {
-      if (err?.name === 'GoalChanged' || err?.name === 'PathStopped') return false;
-      if (err?.name === 'NoPath') {
-        logger.warn('No path found to target');
-        return false;
-      }
-      if (err?.name === 'Timeout') {
-        logger.warn('Pathfinder A* timed out');
-        return false;
-      }
-      logger.error(`Pathfinder error: [${err?.name}] ${err?.message ?? err}`);
-      return false;
+      return await Promise.race(racers);
+    } finally {
+      if (backstop) clearTimeout(backstop);
+      if (abortHandler && signal) signal.removeEventListener('abort', abortHandler);
     }
+  }
+
+  /** Is the bot currently submerged / floating in water? */
+  private isInWater(): boolean {
+    const feet = this.bot.blockAt(this.bot.entity.position);
+    const head = this.bot.blockAt(this.bot.entity.position.offset(0, 1, 0));
+    const wet = (b: any) => b && (b.name === 'water' || b.name === 'seagrass' || b.name === 'tall_seagrass' || b.name === 'kelp' || b.name === 'kelp_plant');
+    return wet(feet) || wet(head);
+  }
+
+  /** Nearest standable land surface (solid ground with air above), or null. */
+  private findNearestLandSurface(maxDistance: number = 64): { x: number; y: number; z: number } | null {
+    const groundNames = [
+      'grass_block', 'dirt', 'podzol', 'coarse_dirt', 'rooted_dirt', 'sand', 'red_sand',
+      'gravel', 'stone', 'snow_block', 'moss_block', 'mud', 'packed_mud', 'clay',
+    ];
+    const ids = groundNames.map((n) => this.mcData?.blocksByName[n]?.id).filter((x: any) => x !== undefined);
+    if (ids.length === 0) return null;
+    const positions = this.bot.findBlocks({ matching: ids, maxDistance, count: 128 });
+    for (const pos of positions) {
+      const above = this.bot.blockAt(pos.offset(0, 1, 0));
+      if (above && above.name === 'air') return { x: pos.x, y: pos.y + 1, z: pos.z };
+    }
+    return null;
+  }
+
+  /** Manually swim toward a target while holding jump — reliably hops out of water. */
+  private async swimToward(target: { x: number; y: number; z: number }, signal?: AbortSignal, maxMs = 8000): Promise<void> {
+    const deadline = Date.now() + maxMs;
+    const tgt = new Vec3(target.x + 0.5, target.y, target.z + 0.5);
+    try {
+      this.bot.setControlState('forward', true);
+      this.bot.setControlState('jump', true); // swim up + hop the ledge
+      this.bot.setControlState('sprint', true);
+      while (Date.now() < deadline && this.isInWater()) {
+        if (signal?.aborted) break;
+        try { await this.bot.lookAt(tgt, true); } catch { /* ignore */ }
+        await new Promise((r) => setTimeout(r, 200));
+      }
+    } finally {
+      this.bot.setControlState('forward', false);
+      this.bot.setControlState('jump', false);
+      this.bot.setControlState('sprint', false);
+    }
+    if (!this.isInWater()) logger.info('Climbed out of water');
+  }
+
+  /**
+   * Get the bot onto safe ground after a hostile spawn:
+   *  - in WATER  -> swim to the nearest land surface and climb out (the bot
+   *                 floats, so mining down here would just stall — and it can drown);
+   *  - on a TREE -> mine straight down the trunk (pathfinder won't tunnel down).
+   * Returns true once on non-tree solid ground (or already there).
+   */
+  async recoverToSafeGround(signal?: AbortSignal, maxSteps: number = 48): Promise<boolean> {
+    // --- Water: swim out before anything else (avoid getting stuck/killed at the edge) ---
+    for (let tries = 0; tries < 4 && this.isInWater(); tries++) {
+      if (signal?.aborted) return false;
+      const land = this.findNearestLandSurface(64);
+      if (!land) { logger.warn('Spawned in water but no land found within 64 blocks'); break; }
+      logger.info(`In water — heading to land at (${land.x}, ${land.y}, ${land.z})`);
+      await this.navigateTo(land, signal, 1, false, 15000);
+      // Pathfinder is unreliable at the water->land climb, so if we're still wet,
+      // manually swim toward the shore while holding jump to hop out.
+      if (this.isInWater()) await this.swimToward(land, signal);
+    }
+
+    // --- Tree canopy: mine straight down to the ground ---
+    const isTreeBlock = (name: string) =>
+      name.endsWith('_log') || name.endsWith('_leaves') || name.endsWith('_wood') ||
+      name.endsWith('_stem') || name.endsWith('_hyphae') || name === 'mangrove_roots';
+
+    for (let i = 0; i < maxSteps; i++) {
+      if (signal?.aborted) return false;
+      const feet = this.bot.entity.position.floored();
+      const below = this.bot.blockAt(feet.offset(0, -1, 0));
+      if (!below) return false; // chunk not loaded
+
+      const empty = below.name === 'air' || below.name === 'cave_air' || (below as any).boundingBox === 'empty';
+      if (empty) {
+        // Mid-fall or a gap — let gravity settle, then re-check.
+        await new Promise((r) => setTimeout(r, 300));
+        continue;
+      }
+      if (!isTreeBlock(below.name)) {
+        if (i > 0) logger.info(`Descended to ground (${below.name}) after ${i} step(s)`);
+        return true; // standing on real (non-tree) ground
+      }
+      // Don't dig into a lava pocket beneath the trunk.
+      const twoBelow = this.bot.blockAt(feet.offset(0, -2, 0));
+      if (twoBelow && twoBelow.name === 'lava') {
+        logger.warn('Descent aborted: lava below trunk');
+        return false;
+      }
+      try {
+        await this.bot.dig(below);
+      } catch (err) {
+        logger.warn('Descent dig failed:', err);
+        return false;
+      }
+      await new Promise((r) => setTimeout(r, 400)); // fall one block
+    }
+    return false;
   }
 
   protected cleanup(): void {
     try {
-      (this.bot as any).pathfinder?.stop?.();
+      (this.bot as any).ashfinder?.stop?.();
     } catch {
       // ignore
     }

@@ -77,6 +77,35 @@ function initializeBot(): void {
 
   bot = mineflayer.createBot(botOptions);
 
+  // --- Resource-pack handshake ---
+  // Servers that FORCE a resource pack hold the client in the configuration phase
+  // until it acknowledges; without this the bot connects but never spawns.
+  // mineflayer's bot.acceptResourcePack() mis-branches on newer protocols (e.g.
+  // 1.21.11) and omits the required uuid, so respond to the raw packets directly.
+  // We accept-without-downloading (ACCEPTED=3 then SUCCESSFULLY_LOADED=0).
+  {
+    const client: any = bot._client;
+    const ackResourcePack = (uuid?: string) => {
+      try {
+        const base = uuid !== undefined ? { uuid } : {};
+        client.write('resource_pack_receive', { ...base, result: 3 });
+        client.write('resource_pack_receive', { ...base, result: 0 });
+      } catch (err) {
+        logger.warn('Failed to acknowledge resource pack:', err);
+      }
+    };
+    // Configuration phase (1.20.3+): add_resource_pack carries the uuid.
+    client.on('add_resource_pack', (data: any) => {
+      logger.info('Resource pack requested (configuration); acknowledging', { forced: data?.forced });
+      ackResourcePack(data?.uuid);
+    });
+    // Play phase / older servers: resource_pack_send.
+    client.on('resource_pack_send', (data: any) => {
+      logger.info('Resource pack requested (play); acknowledging');
+      ackResourcePack(data?.uuid);
+    });
+  }
+
   // Load additional plugins after bot creation
   try {
     const autoEat = require('@nxg-org/mineflayer-auto-eat');
@@ -109,7 +138,7 @@ function initializeBot(): void {
     metrics.increment('bot_spawns');
 
     // Pathfinder is loaded by NavigationModule.initialize()
-    onBotSpawned();
+    onBotSpawned().catch((err) => logger.error('onBotSpawned failed:', err));
   });
 
   bot.on('kicked', (reason: string) => {
@@ -148,7 +177,7 @@ function initializeBot(): void {
   });
 }
 
-function onBotSpawned(): void {
+async function onBotSpawned(): Promise<void> {
   if (!bot) return;
 
   const profile = createDefaultProfile();
@@ -158,17 +187,23 @@ function onBotSpawned(): void {
   const navModule = new NavigationModule(moduleCtx);
   navModule.initialize();
 
+  // Recover from a hostile spawn (in water -> swim to land; in a tree canopy ->
+  // mine down) so the bot starts on safe ground.
+  await navModule.recoverToSafeGround();
+
+  // Exploration is created before gathering so gathering can relocate via it
+  // when no target is reachable nearby.
+  const exploreModule = new ExplorationModule(moduleCtx);
+  exploreModule.initialize(navModule);
+
   const gatherModule = new GatheringModule(moduleCtx);
-  gatherModule.initialize(navModule);
+  gatherModule.initialize(navModule, exploreModule);
 
   const craftModule = new CraftingModule(moduleCtx);
   craftModule.initialize(navModule);
 
   const combatModule = new CombatModule(moduleCtx);
   combatModule.initialize(navModule);
-
-  const exploreModule = new ExplorationModule(moduleCtx);
-  exploreModule.initialize(navModule);
 
   const smeltModule = new SmeltingModule(moduleCtx);
   smeltModule.initialize(navModule);

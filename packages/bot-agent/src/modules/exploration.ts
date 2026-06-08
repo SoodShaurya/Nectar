@@ -54,6 +54,46 @@ export class ExplorationModule extends BaseModule {
     }
   }
 
+  /**
+   * Public, side-effect-free relocation helper for other modules (e.g. gathering).
+   * Travels frontier-style until an instance of `blockType` exists near the bot at
+   * a similar elevation (a reachability proxy — avoids deep-buried/walled instances).
+   * Returns true once positioned near a plausibly-reachable instance. Does NOT emit
+   * module complete/fail, so it can be awaited mid-run by another module.
+   */
+  async seekBlock(
+    blockType: string, signal: AbortSignal,
+    opts: { maxHops?: number; yTolerance?: number; searchRadius?: number } = {},
+  ): Promise<boolean> {
+    const { maxHops = 8, yTolerance = 8, searchRadius = 80 } = opts;
+    const blockData = this.mcData.blocksByName[blockType];
+    if (!blockData || !this.navigationModule) return false;
+
+    // We're only called when the current area's targets are unreachable, so HOP
+    // FIRST to genuinely new terrain, THEN check — otherwise we'd keep "finding"
+    // the same nearby-but-unreachable blocks and never leave the bad pocket.
+    for (let hop = 0; hop < maxHops; hop++) {
+      if (this.isAborted(signal)) return false;
+      await this.waitWhilePaused();
+
+      const target = this.findNextTarget(this.bot.entity.position, 256);
+      if (!target) { logger.warn(`seekBlock: no unexplored frontier left for ${blockType}`); return false; }
+      logger.info(`seekBlock: hop ${hop + 1}/${maxHops} toward (${target.x}, ${target.z}) seeking ${blockType}`);
+      await this.navigationModule.navigateTo(target, signal, 2, true, 25000); // frontier hop (ignoreY)
+      if (this.isAborted(signal)) return false;
+      this.markChunkExplored(this.bot.entity.position);
+
+      const botY = this.bot.entity.position.y;
+      const candidates = this.bot.findBlocks({ matching: blockData.id, maxDistance: searchRadius, count: 64 });
+      if (candidates.some((p) => Math.abs(p.y - botY) <= yTolerance)) {
+        logger.info(`seekBlock: reachable ${blockType} found after ${hop + 1} hop(s)`);
+        return true;
+      }
+    }
+    logger.warn(`seekBlock: gave up seeking ${blockType} after ${maxHops} hops`);
+    return false;
+  }
+
   private chunkKey(cx: number, cz: number): string {
     return `${cx},${cz}`;
   }
