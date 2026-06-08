@@ -45,6 +45,7 @@ const PATROL_PAUSE_MS = 4000; // 4 seconds at each waypoint for chunk loading + 
 export class CombatModule extends BaseModule {
   readonly name = 'combat';
   private navigationModule: NavigationModule | null = null;
+  private lastRetreatAt = 0;
 
   constructor(ctx: ModuleContext) {
     super(ctx);
@@ -273,10 +274,42 @@ export class CombatModule extends BaseModule {
     if (healthPct <= retreatThreshold) {
       logger.warn(`Health below retreat threshold (${(healthPct * 100).toFixed(0)}%)`);
       this.alert({ type: 'health_low', health: this.bot.health, threshold: retreatThreshold });
+      // Actually disengage: break melee and physically flee, not just alert+fail
+      // (the old code left the body standing in the mob's hit arc). Gated so a
+      // tight caller loop doesn't re-issue the flee path every tick.
+      this.retreatFromHostiles();
       this.fail('Health below retreat threshold');
       return true;
     }
     return false;
+  }
+
+  /**
+   * Break out of melee and move ~10 blocks away from the nearest hostile.
+   * Fire-and-forget (callers are sync); gated to avoid path thrashing.
+   */
+  private retreatFromHostiles(): void {
+    const now = Date.now();
+    if (now - this.lastRetreatAt < 3000) return; // gate: don't re-issue every tick
+    this.lastRetreatAt = now;
+
+    // (a) Break melee so swordpvp stops chasing the target.
+    try { (this.bot as any).swordpvp?.stop(); } catch { /* ignore */ }
+
+    // (b) Physically move away from the nearest hostile, ~10 blocks out.
+    if (!this.navigationModule || !this.bot.entity) return;
+    const hostile = this.bot.nearestEntity((e) =>
+      e.type === 'hostile' && e.position.distanceTo(this.bot.entity.position) < 32
+    );
+    if (!hostile) return;
+    try {
+      const awayDir = this.bot.entity.position.minus(hostile.position).normalize().scale(10);
+      const awayPos = this.bot.entity.position.plus(awayDir);
+      // Fire-and-forget: caller is synchronous and about to fail() the module.
+      void this.navigationModule.navigateTo(
+        { x: Math.floor(awayPos.x), y: Math.floor(awayPos.y), z: Math.floor(awayPos.z) },
+      ).catch(() => { /* ignore: best-effort flee */ });
+    } catch { /* ignore */ }
   }
 
   private findTargetByPriority(
@@ -300,6 +333,8 @@ export class CombatModule extends BaseModule {
   }
 
   private async engageTarget(target: Entity): Promise<void> {
+    // Equip a shield to the off-hand so swordpvp's built-in shield-blocking works.
+    await this.equipShield();
     try {
       const pvp = (this.bot as any).swordpvp || (this.bot as any).pvp;
       if (pvp) {
@@ -309,6 +344,23 @@ export class CombatModule extends BaseModule {
       }
     } catch (err) {
       logger.warn('Attack failed:', err);
+    }
+  }
+
+  /**
+   * Equip a shield to the off-hand if we have one and it isn't already equipped.
+   * Guarded so we don't re-equip (and interrupt blocking) every engage call.
+   */
+  private async equipShield(): Promise<void> {
+    try {
+      // Off-hand is the slot just after the hotbar (slot 45 on the player window).
+      const offHandItem = (this.bot.inventory as any).slots?.[45];
+      if (offHandItem && offHandItem.name === 'shield') return; // already equipped
+      const shield = this.bot.inventory.items().find((i) => i.name === 'shield');
+      if (!shield) return;
+      await this.bot.equip(shield, 'off-hand');
+    } catch (err) {
+      logger.warn('Could not equip shield:', err);
     }
   }
 

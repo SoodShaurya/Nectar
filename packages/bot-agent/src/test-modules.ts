@@ -432,6 +432,12 @@ async function testCombat(bot: Bot, combat: CombatModule): Promise<boolean> {
   // Equip a sword if we have one (swordpvp uses the held weapon).
   const sword = bot.inventory.items().find((i) => i.name.endsWith('_sword'));
   if (sword) { try { await bot.equip(sword, 'hand'); console.log(`  equipped ${sword.name}`); } catch { /* ignore */ } }
+  // KIT NOTE: RCON-give the bot a shield before this test so off-hand blocking
+  // works (swordpvp blocks with the off-hand shield). CombatModule.engageTarget
+  // also auto-equips one if present; equip here too so a held shield is in the
+  // off-hand from the start of the fight.
+  const shield = bot.inventory.items().find((i) => i.name === 'shield');
+  if (shield) { try { await bot.equip(shield, 'off-hand'); console.log(`  equipped ${shield.name} (off-hand)`); } catch { /* ignore */ } }
   const startHealth = bot.health;
 
   (combat as any).activate({ mode: 'aggressive', engagementPolicy: 'engage', targetPriority: ['hostile'], retreatThreshold: 0.15, reportPlayers: false });

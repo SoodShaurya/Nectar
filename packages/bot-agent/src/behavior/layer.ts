@@ -1,10 +1,13 @@
 import { EventEmitter } from 'events';
 import { Bot } from 'mineflayer';
 import { createLogger } from '@aetherius/shared-types';
+import { goals } from 'mineflayer-pathfinder';
 import { AgentBehaviorProfile, createDefaultProfile } from './profile';
 import { BehaviorAlert, BehaviorAlertType } from './alerts';
 import { AgentModule } from '../types';
 import { Entity } from 'prismarine-entity';
+
+const { GoalNear } = goals;
 
 const logger = createLogger('bot-agent:behavior');
 
@@ -40,6 +43,8 @@ export class BehaviorLayer extends EventEmitter {
   private inCombat = false;
   private combatTargetId: number | null = null;
   private lastBasicAttack = 0;
+  private lastRetreatAt = 0;
+  private shieldEquipFailed = false;
   private lastHealthAlertTime = 0;
   private lastFoodAlertTime = 0;
   private lastPlayerAlertTime = 0;
@@ -106,10 +111,16 @@ export class BehaviorLayer extends EventEmitter {
       this.isRetreating = true;
       this.activeModule?.pause();
 
+      // Actually disengage and flee — the old code only paused/alerted, leaving
+      // the body standing in melee where it kept taking hits and died.
+      this.inCombat = false;
+      this.combatTargetId = null;
+      const retreatingTo = this.retreatFromHostiles();
+
       const alert = this.createAlert('health_low', {
         health: this.bot.health,
         threshold,
-        retreatingTo: null, // TODO: determine safe retreat position
+        retreatingTo,
       }, this.activeModule ? 'paused' : 'unaffected');
 
       this.emitAlert(alert);
@@ -119,6 +130,7 @@ export class BehaviorLayer extends EventEmitter {
     // Hysteresis: resume when health > threshold + 0.1
     if (this.isRetreating && healthPct > threshold + 0.1) {
       this.isRetreating = false;
+      try { (this.bot as any).pathfinder?.setGoal(null); } catch { /* ignore */ }
       this.activeModule?.resume();
       logger.info('Health recovered, resuming');
     }
@@ -169,6 +181,9 @@ export class BehaviorLayer extends EventEmitter {
     if (!this.inCombat) {
       this.inCombat = true;
       this.activeModule?.pause();
+      // Equip a shield to the off-hand so swordpvp's shield-blocking works.
+      // Fire-and-forget (tick is sync); equipShield is guarded against re-equip.
+      void this.equipShield();
       logger.info(`Engaging hostile: ${hostile.name} (gear=${this.getGearScore()})`);
     }
     try {
@@ -257,6 +272,58 @@ export class BehaviorLayer extends EventEmitter {
   }
 
   // --- Utility ---
+
+  /**
+   * Break melee and physically flee ~10 blocks away from the nearest hostile so
+   * the bot stops trading hits. Gated to avoid re-issuing the path every tick.
+   * Returns the retreat target (for the alert), or null if no flee was issued.
+   */
+  private retreatFromHostiles(): { x: number; y: number; z: number } | null {
+    const now = Date.now();
+    if (now - this.lastRetreatAt < 3000) return null; // gate: don't thrash the path
+    this.lastRetreatAt = now;
+
+    // (a) Break melee so swordpvp stops chasing the target.
+    try { (this.bot as any).swordpvp?.stop(); } catch { /* ignore */ }
+
+    // (b) Move away from the nearest hostile, ~10 blocks out.
+    const pf = (this.bot as any).pathfinder;
+    if (!pf || !this.bot.entity) return null;
+    const pos = this.bot.entity.position;
+    const hostile = this.bot.nearestEntity((e) =>
+      e.type === 'hostile' && e.position.distanceTo(pos) < 32
+    );
+    if (!hostile) return null;
+    try {
+      const awayDir = pos.minus(hostile.position).normalize().scale(10);
+      const awayPos = pos.plus(awayDir);
+      const target = { x: Math.floor(awayPos.x), y: Math.floor(awayPos.y), z: Math.floor(awayPos.z) };
+      pf.setGoal(new GoalNear(target.x, target.y, target.z, 2));
+      return target;
+    } catch { /* ignore */ }
+    return null;
+  }
+
+  /**
+   * Equip a shield to the off-hand (if present and not already equipped) so
+   * swordpvp's built-in shield-blocking works. Guarded against re-equip spam.
+   */
+  private async equipShield(): Promise<void> {
+    try {
+      const offHandItem = (this.bot.inventory as any).slots?.[45];
+      if (offHandItem && offHandItem.name === 'shield') return; // already equipped
+      const shield = this.bot.inventory.items().find((i) => i.name === 'shield');
+      if (!shield) return;
+      await this.bot.equip(shield, 'off-hand');
+      this.shieldEquipFailed = false;
+    } catch (err) {
+      if (!this.shieldEquipFailed) {
+        this.shieldEquipFailed = true; // log once, not every combat entry
+        logger.warn('Could not equip shield:', err);
+      }
+    }
+  }
+
   private getGearScore(): number {
     let score = 0;
     const armorSlots = [5, 6, 7, 8];

@@ -263,6 +263,29 @@ async function onBotSpawned(): Promise<void> {
     logger.warn('Could not configure auto-eat:', err);
   }
 
+  // --- Configure swordpvp for survivability ---
+  // Defaults leave the bot too aggressive (it stays in the mob's hit arc and
+  // never backs off after taking a hit), so it dies in melee. Tighten the
+  // follow distance and lengthen the post-hit backoff. strafe/crit/onHit
+  // configs default on; we leave them enabled and only adjust fields that exist.
+  if ((bot as any).swordpvp) {
+    try {
+      const opts = (bot as any).swordpvp.options;
+      if (opts) {
+        if (opts.followConfig) {
+          opts.followConfig.distance = 2; // keep just outside the mob's reach
+        }
+        if (opts.onHitConfig) {
+          // Back off longer after taking a hit (default is short -> bot re-enters
+          // the hit arc immediately and trades blows it loses).
+          opts.onHitConfig.tickCount = 7;
+        }
+      }
+    } catch (err) {
+      logger.warn('Could not configure swordpvp:', err);
+    }
+  }
+
   // --- Status Reporting ---
   setInterval(() => {
     if (!bot?.entity || !bot.inventory) return;
