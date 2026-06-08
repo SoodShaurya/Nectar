@@ -126,7 +126,7 @@ export class ExplorationModule extends BaseModule {
         return this.fail('Navigation module not available');
       }
 
-      const reached = await this.navigationModule.navigateTo(target, signal);
+      const reached = await this.navigationModule.navigateTo(target, signal, 2, true);
       if (this.isAborted(signal)) return;
 
       if (!reached) {
@@ -201,7 +201,7 @@ export class ExplorationModule extends BaseModule {
         return this.fail('Navigation module not available');
       }
 
-      const reached = await this.navigationModule.navigateTo(target, signal);
+      const reached = await this.navigationModule.navigateTo(target, signal, 2, true);
       if (this.isAborted(signal)) return;
 
       if (!reached) {
@@ -242,7 +242,7 @@ export class ExplorationModule extends BaseModule {
       }
 
       if (!this.navigationModule) return this.fail('Navigation module not available');
-      await this.navigationModule.navigateTo(target, signal);
+      await this.navigationModule.navigateTo(target, signal, 2, true);
       if (this.isAborted(signal)) return;
 
       await new Promise(resolve => setTimeout(resolve, 500));
@@ -253,6 +253,8 @@ export class ExplorationModule extends BaseModule {
     logger.info(`Scouting area within ${radius} blocks`);
     const origin = this.bot.entity.position.clone();
     let chunksExplored = 0;
+    let consecutiveFailures = 0;
+    const maxConsecutiveFailures = 5;
 
     while (!this.isAborted(signal)) {
       await this.waitWhilePaused();
@@ -261,22 +263,67 @@ export class ExplorationModule extends BaseModule {
       this.markChunkExplored(this.bot.entity.position);
       chunksExplored++;
 
-      const target = this.findNextTarget(origin, radius);
+      // Search from current position to find nearby unexplored chunks
+      const currentPos = this.bot.entity.position;
+      let target = this.findNextTarget(currentPos, Math.min(radius, 48));
       if (!target) {
-        return this.complete({ chunksExplored, radius });
+        // Check if there are unexplored chunks from origin's perspective
+        target = this.findNextTarget(origin, radius);
+        if (!target) {
+          return this.complete({ chunksExplored, radius });
+        }
       }
 
+      // Try to find safe ground Y at the target location
+      target.y = this.findSafeY(target) ?? Math.floor(currentPos.y);
+
       if (!this.navigationModule) return this.fail('Navigation module not available');
-      const reached = await this.navigationModule.navigateTo(target, signal);
+
+      // Check for NaN position before navigating
+      const pos = this.bot.entity.position;
+      if (isNaN(pos.x) || isNaN(pos.z)) {
+        logger.error('Bot position is NaN, aborting scout');
+        return this.fail('Bot position corrupted (NaN)');
+      }
+
+      const reached = await this.navigationModule.navigateTo(target, signal, 2, true);
       if (this.isAborted(signal)) return;
 
       if (!reached) {
+        consecutiveFailures++;
+        logger.warn(`Navigation failed (${consecutiveFailures}/${maxConsecutiveFailures}) to chunk (${Math.floor(target.x / 16)}, ${Math.floor(target.z / 16)})`);
+        // Mark as explored only after multiple failures — skip this chunk for now
         const cx = Math.floor(target.x / 16);
         const cz = Math.floor(target.z / 16);
         this.exploredChunks.add(this.chunkKey(cx, cz));
+
+        if (consecutiveFailures >= maxConsecutiveFailures) {
+          logger.warn(`Too many consecutive navigation failures, completing scout`);
+          return this.complete({ chunksExplored, radius, earlyStop: 'navigation_failures' });
+        }
+      } else {
+        consecutiveFailures = 0;
       }
 
       await new Promise(resolve => setTimeout(resolve, 500));
     }
+  }
+
+  /** Try to find a safe Y (solid block with air above) at target coords from loaded chunks */
+  private findSafeY(target: Coordinates): number | null {
+    try {
+      // Check from y=100 down to y=50 for solid ground
+      for (let y = 100; y >= 50; y--) {
+        const block = this.bot.blockAt(new Vec3(target.x, y, target.z));
+        const above = this.bot.blockAt(new Vec3(target.x, y + 1, target.z));
+        if (block && block.name !== 'air' && block.name !== 'water' && block.name !== 'lava'
+            && above && above.name === 'air') {
+          return y + 1; // Stand on top of the solid block
+        }
+      }
+    } catch {
+      // Chunks not loaded at target location — fall back to origin Y
+    }
+    return null;
   }
 }

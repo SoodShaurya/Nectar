@@ -1,5 +1,30 @@
 # Aetherius Project Plan
 
+> ⚠️ **HISTORICAL / PRE-OVERHAUL DOCUMENT.** This plan describes the original three-tier architecture
+> (Orchestrator with Gemini 1.5 Pro → dynamically-spawned Squad Leaders with Gemini 1.5 Flash → Bot Agents).
+> The project has since been overhauled to a single conversational **Coordinator** (Gemini 3 Flash) that
+> manages a MongoDB-persisted goal board and dispatches tasks directly to agents via the Bot Server Manager.
+> Squad Leaders no longer exist, and the Orchestrator Service is archived under `packages/_archived_*`.
+> The phase plan, diagrams, and `squadLeader::*` message flows below are retained for historical context only.
+>
+> **For the current architecture, see [README.md](./README.md).**
+
+---
+
+### Current architecture (summary)
+
+- **Coordinator** (Gemini 3 Flash, `@google/genai`): conversational planning; owns a MongoDB-persisted goal
+  board; deterministically resolves crafting goals into task-trees; dispatches tasks directly to agents.
+- **Bot Server Manager (BSM)**: spawns and supervises `bot-agent` processes; routes messages (Coordinator WS
+  ⇄ agent TCP) with bounded outbound queues and command acknowledgments.
+- **Bot Agent**: Mineflayer bot with a 50ms reactive behavior layer plus skill modules.
+- **World State Service**: persists the goal board, POIs, resources, and infrastructure in MongoDB.
+- **Shared Types**: frozen, versioned, schema-validated message protocol and config schemas.
+
+There is no longer a Squad Leader tier or a strategic/tactical LLM split — one Coordinator handles both.
+
+---
+
 ## 1. Introduction
 
 This document outlines the development plan for the "Aetherius" project, a distributed, collaborative multi-agent system in Node.js designed to autonomously complete the "Beat the Ender Dragon" objective in Minecraft. The plan is based on the provided specification document.

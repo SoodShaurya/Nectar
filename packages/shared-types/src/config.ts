@@ -4,24 +4,16 @@ import { z } from 'zod';
 const numberFromString = (defaultValue: string) =>
   z.string().regex(/^\d+$/).default(defaultValue).transform(Number);
 
-// Orchestrator Configuration Schema
-export const orchestratorConfigSchema = z.object({
-  GEMINI_API_KEY: z.string().min(1, 'GEMINI_API_KEY is required'),
-  ORCHESTRATOR_PORT: numberFromString('5000'),
-  ORCHESTRATOR_WS_PORT: numberFromString('5001'),
-  WORLD_STATE_API_ADDRESS: z.string().url().default('http://localhost:3000'),
-  SQUAD_LEADER_SCRIPT_PATH: z.string().optional(),
-});
-
-export type OrchestratorConfig = z.infer<typeof orchestratorConfigSchema>;
-
-// Coordinator Configuration Schema (replaces orchestrator + squad leader)
+// Coordinator Configuration Schema (replaces the former orchestrator + squad leader tiers)
 export const coordinatorConfigSchema = z.object({
   GEMINI_API_KEY: z.string().min(1, 'GEMINI_API_KEY is required'),
   COORDINATOR_PORT: numberFromString('5000'),
   COORDINATOR_WS_PORT: numberFromString('5001'),
   WORLD_STATE_API_ADDRESS: z.string().url().default('http://localhost:3000'),
   MC_VERSION: z.string().default('1.21.1'),
+  // Optional shared secret. When set, BSMs must present a matching token to
+  // register. Leave unset to disable auth (local dev).
+  CLUSTER_AUTH_TOKEN: z.string().optional(),
 });
 
 export type CoordinatorConfig = z.infer<typeof coordinatorConfigSchema>;
@@ -30,13 +22,18 @@ export type CoordinatorConfig = z.infer<typeof coordinatorConfigSchema>;
 export const bsmConfigSchema = z.object({
   BSM_WS_PORT: numberFromString('4000'),
   BSM_AGENT_PORT: numberFromString('4001'),
-  ORCHESTRATOR_ADDRESS: z.string().url().default('ws://localhost:5001'),
+  // Upstream coordinator WebSocket address. ORCHESTRATOR_ADDRESS is a
+  // deprecated alias kept for backward compatibility — prefer COORDINATOR_ADDRESS.
+  COORDINATOR_ADDRESS: z.string().url().optional(),
+  ORCHESTRATOR_ADDRESS: z.string().url().optional(),
   WORLD_STATE_API_ADDRESS: z.string().url().default('http://localhost:3000'),
   BSM_ID: z.string().optional(),
   AGENT_SCRIPT_PATH: z.string().optional(),
   MC_HOST: z.string().default('localhost'),
   MC_PORT: numberFromString('25565'),
   MC_VERSION: z.string().default('1.21.1'),
+  // Optional shared secret presented to the coordinator and required from agents.
+  CLUSTER_AUTH_TOKEN: z.string().optional(),
 });
 
 export type BsmConfig = z.infer<typeof bsmConfigSchema>;
@@ -51,18 +48,11 @@ export const agentConfigSchema = z.object({
   MC_VERSION: z.string().default('1.21.1'),
   MC_AUTH: z.enum(['microsoft', 'offline']).default('offline'),
   MC_USERNAME: z.string().optional(), // Microsoft email for online-mode servers
+  // Optional shared secret presented to the BSM on TCP registration.
+  CLUSTER_AUTH_TOKEN: z.string().optional(),
 });
 
 export type AgentConfig = z.infer<typeof agentConfigSchema>;
-
-// Squad Leader Configuration Schema
-export const squadLeaderConfigSchema = z.object({
-  SQUAD_ID: z.string().optional(),
-  ORCHESTRATOR_ADDRESS: z.string().url(),
-  GEMINI_API_KEY: z.string().min(1, 'GEMINI_API_KEY is required'),
-});
-
-export type SquadLeaderConfig = z.infer<typeof squadLeaderConfigSchema>;
 
 // World State Service Configuration Schema
 export const worldStateConfigSchema = z.object({

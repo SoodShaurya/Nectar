@@ -4,19 +4,43 @@
  */
 
 import WebSocket from 'ws';
-import { AgentInfo, WebSocketMessage, CompletionCondition, Coordinates, createLogger, metrics } from '@aetherius/shared-types';
+import { EventEmitter } from 'events';
+import { AgentInfo, WebSocketMessage, CompletionCondition, Coordinates, createLogger, metrics, MsgType } from '@aetherius/shared-types';
 
 const logger = createLogger('coordinator:agents');
 
-export interface ExtendedAgentInfo extends AgentInfo {
+/** How long to wait for an agent to ack a dispatched command before giving up. */
+const COMMAND_ACK_TIMEOUT_MS = 10000;
+
+/**
+ * Coordinator-internal agent status. Extends the frozen shared-types union
+ * (`idle | busy | unknown`) with a transient `pending` state used while a
+ * dispatched command is awaiting acknowledgment (design [A]).
+ */
+export type CoordinatorAgentStatus = AgentInfo['status'] | 'pending';
+
+export interface ExtendedAgentInfo extends Omit<AgentInfo, 'status'> {
+  status: CoordinatorAgentStatus;
   inventoryMap: Record<string, number>;
   currentTaskId?: string;
   lastStatusUpdate?: number;
 }
 
-export class AgentManager {
+/**
+ * Manages agent state and command dispatch. Extends EventEmitter so index.ts
+ * (which owns the LLM) can react to lifecycle changes that require a replan:
+ *   - 'replan' { reason, agentId? } — emitted on ack timeout or BSM disconnect
+ *     where an agent had an active task and the LLM should re-evaluate.
+ */
+export class AgentManager extends EventEmitter {
   private knownBSMs: Map<string, { address: string; ws: WebSocket }> = new Map();
   private knownAgents: Map<string, ExtendedAgentInfo> = new Map();
+  /** Pending command-ack timers, keyed by agentId. */
+  private ackTimeouts: Map<string, NodeJS.Timeout> = new Map();
+
+  constructor() {
+    super();
+  }
 
   // --- BSM Registration ---
   registerBSM(
@@ -47,21 +71,35 @@ export class AgentManager {
 
   handleBSMDisconnect(ws: WebSocket): string | null {
     let disconnectedBsmId: string | null = null;
+    let hadActiveTask = false;
     for (const [id, bsm] of this.knownBSMs) {
       if (bsm.ws === ws) {
         disconnectedBsmId = id;
         const bsmAddress = bsm.address;
         this.knownBSMs.delete(id);
-        // Mark agents from this BSM as unknown
+        // Mark agents from this BSM as unknown and clear any active task so they
+        // are not stuck 'busy'/'pending' (design [B]).
         for (const agent of this.knownAgents.values()) {
           if (agent.bsmAddress === bsmAddress) {
+            if (agent.currentTaskId) {
+              hadActiveTask = true;
+            }
+            this.clearAckTimeout(agent.agentId);
             agent.status = 'unknown';
+            agent.currentTaskId = undefined;
+            agent.currentTaskType = undefined;
             logger.warn(`Agent ${agent.agentId} marked unknown (BSM ${id} disconnected)`);
           }
         }
         break;
       }
     }
+
+    // If any disconnected agent had an active task, surface a replan trigger.
+    if (hadActiveTask) {
+      this.emit('replan', { reason: 'bsmDisconnect', bsmId: disconnectedBsmId });
+    }
+
     return disconnectedBsmId;
   }
 
@@ -125,20 +163,67 @@ export class AgentManager {
     }
 
     const message: WebSocketMessage = {
-      type: 'orchestrator::agentCommand',
+      type: MsgType.AgentCommand,
       senderId: 'coordinator',
       payload: { agentId, taskId, task, completionCondition },
     };
 
     bsmWs.send(JSON.stringify(message));
 
-    agent.status = 'busy';
+    // Do NOT optimistically mark 'busy'. The agent must ack the command first
+    // (design [A]). Mark 'pending', remember the taskId/type, and start an ack
+    // timeout. The status is promoted to 'busy' in handleCommandAck().
+    agent.status = 'pending';
     agent.currentTaskId = taskId;
     agent.currentTaskType = task.type as any;
+    agent.lastStatusUpdate = Date.now();
+    this.startAckTimeout(agentId, taskId);
 
-    logger.info(`Command sent to ${agentId}: ${task.type} (${taskId})`);
+    logger.info(`Command sent to ${agentId}: ${task.type} (${taskId}) — awaiting ack`);
     metrics.increment('commands_sent');
     return true;
+  }
+
+  /**
+   * Handle a command acknowledgment relayed from the BSM (design [A] step 5).
+   * Returns whether index.ts should trigger a replan (true on rejection).
+   */
+  handleCommandAck(
+    agentId: string,
+    payload: { agentId?: string; taskId?: string; accepted?: boolean; reason?: string },
+  ): { shouldReplan: boolean } {
+    const agent = this.knownAgents.get(agentId);
+    this.clearAckTimeout(agentId);
+
+    if (!agent) {
+      logger.warn(`Command ack for unknown agent: ${agentId}`);
+      return { shouldReplan: false };
+    }
+
+    // Ignore stale acks for a task the agent is no longer running.
+    if (payload.taskId && agent.currentTaskId && payload.taskId !== agent.currentTaskId) {
+      logger.warn(`Stale command ack for ${agentId}`, {
+        ackTaskId: payload.taskId,
+        currentTaskId: agent.currentTaskId,
+      });
+      return { shouldReplan: false };
+    }
+
+    if (payload.accepted) {
+      agent.status = 'busy';
+      agent.currentTaskId = payload.taskId ?? agent.currentTaskId;
+      logger.info(`Command accepted by ${agentId} (${agent.currentTaskId})`);
+      metrics.increment('commands_accepted');
+      return { shouldReplan: false };
+    }
+
+    // Rejected — free the agent and let the coordinator replan.
+    agent.status = 'idle';
+    agent.currentTaskId = undefined;
+    agent.currentTaskType = undefined;
+    logger.warn(`Command rejected by ${agentId}`, { reason: payload.reason });
+    metrics.increment('commands_rejected');
+    return { shouldReplan: true };
   }
 
   cancelTask(agentId: string, taskId?: string): boolean {
@@ -155,12 +240,13 @@ export class AgentManager {
     }
 
     const message: WebSocketMessage = {
-      type: 'orchestrator::cancelTask',
+      type: MsgType.CancelTask,
       senderId: 'coordinator',
       payload: { agentId, taskId: taskId ?? agent.currentTaskId },
     };
     bsmWs.send(JSON.stringify(message));
 
+    this.clearAckTimeout(agentId);
     agent.status = 'idle';
     agent.currentTaskId = undefined;
     agent.currentTaskType = undefined;
@@ -189,7 +275,7 @@ export class AgentManager {
     }
 
     const message: WebSocketMessage = {
-      type: 'orchestrator::chatMessage',
+      type: MsgType.ChatMessage,
       senderId: 'coordinator',
       payload: { agentId, message: chatMessage },
     };
@@ -213,7 +299,7 @@ export class AgentManager {
     }
 
     const message: WebSocketMessage = {
-      type: 'orchestrator::updateProfile',
+      type: MsgType.UpdateProfile,
       senderId: 'coordinator',
       payload: { agentId, profile },
     };
@@ -264,5 +350,35 @@ export class AgentManager {
       }
     }
     return null;
+  }
+
+  /** Start (replacing any existing) command-ack timeout for an agent (design [A] step 6). */
+  private startAckTimeout(agentId: string, taskId: string): void {
+    this.clearAckTimeout(agentId);
+    const timer = setTimeout(() => {
+      this.ackTimeouts.delete(agentId);
+      const agent = this.knownAgents.get(agentId);
+      // Only act if the agent is still awaiting ack for this exact task.
+      if (!agent || agent.currentTaskId !== taskId || agent.status !== 'pending') {
+        return;
+      }
+      // No ack arrived: free the agent and trigger a replan.
+      agent.status = 'unknown';
+      agent.currentTaskId = undefined;
+      agent.currentTaskType = undefined;
+      logger.warn(`Command ack timeout for ${agentId} (${taskId}) — no ack received`);
+      metrics.increment('command_ack_timeouts');
+      this.emit('replan', { reason: 'ackTimeout', agentId });
+    }, COMMAND_ACK_TIMEOUT_MS);
+    this.ackTimeouts.set(agentId, timer);
+  }
+
+  /** Clear a pending command-ack timeout for an agent, if any. */
+  private clearAckTimeout(agentId: string): void {
+    const timer = this.ackTimeouts.get(agentId);
+    if (timer) {
+      clearTimeout(timer);
+      this.ackTimeouts.delete(agentId);
+    }
   }
 }

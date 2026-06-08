@@ -61,39 +61,54 @@ export class TaskManager {
     this.modules.set(module.name, module);
   }
 
-  handleCommand(taskId: string, task: TaskObject, completionCondition?: CompletionCondition): void {
+  /**
+   * Handle a new command from the coordinator (via BSM).
+   *
+   * Returns an acceptance result so the caller can emit the immediate command
+   * ack (design [A] step 3): `accepted:false` + reason when the task cannot be
+   * accepted (validation failure / unknown or unregistered module), otherwise
+   * `accepted:true`. The rejection events are still reported internally as before.
+   */
+  handleCommand(
+    taskId: string,
+    task: TaskObject,
+    completionCondition?: CompletionCondition,
+  ): { accepted: boolean; reason?: string } {
     metrics.increment('commands_received');
     metrics.increment(`command_${task.type}`);
 
     // Validate
     if (!this.validateCommand(task)) {
+      const reason = 'Validation failed';
       this.bsm.reportEvent({
         eventType: 'taskRejected',
         taskId,
-        details: { reason: 'Validation failed' },
+        details: { reason },
       });
-      return;
+      return { accepted: false, reason };
     }
 
     // Find module
     const moduleName = TASK_MODULE_MAP[task.type];
     if (!moduleName) {
+      const reason = `No module for task type: ${task.type}`;
       this.bsm.reportEvent({
         eventType: 'taskFailed',
         taskId,
-        details: { reason: `No module for task type: ${task.type}` },
+        details: { reason },
       });
-      return;
+      return { accepted: false, reason };
     }
 
     const module = this.modules.get(moduleName);
     if (!module) {
+      const reason = `Module not registered: ${moduleName}`;
       this.bsm.reportEvent({
         eventType: 'taskFailed',
         taskId,
-        details: { reason: `Module not registered: ${moduleName}` },
+        details: { reason },
       });
-      return;
+      return { accepted: false, reason };
     }
 
     // Deactivate current task (cleanup intervals + listeners)
@@ -171,6 +186,8 @@ export class TaskManager {
         }
       }, CONDITION_CHECK_INTERVAL_MS);
     }
+
+    return { accepted: true };
   }
 
   /** Cancel the current task. Called when coordinator sends cancelTask. */

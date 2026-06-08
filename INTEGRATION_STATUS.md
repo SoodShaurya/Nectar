@@ -1,6 +1,31 @@
 # Integration Status: Utilities → Services
 
-## ✅ COMPLETED
+> ⚠️ **HISTORICAL / PRE-OVERHAUL DOCUMENT.** This file describes the original three-tier system
+> (Orchestrator + Squad Leaders + Agents). That architecture has since been replaced by a single
+> conversational **Coordinator** (Gemini 3 Flash). The Orchestrator Service and Squad Leader packages
+> are **archived** under `packages/_archived_*` and are no longer built or run. References below to
+> `orchestratorConfigSchema` / `squadLeaderConfigSchema`, `squadLeader::*` messages, Gemini 1.5 Pro/Flash,
+> and the per-service tables are kept only as a record of the old integration work.
+>
+> **For the current architecture, see [README.md](./README.md).**
+
+---
+
+### Current architecture (summary)
+
+| Service | Role | AI Model | Status |
+|---------|------|----------|--------|
+| **Coordinator** | Conversational planning, goal board, crafting task-trees, task dispatch | Gemini 3 Flash | Active |
+| **Bot Server Manager (BSM)** | Spawns/supervises bot-agents; routes WS ⇄ TCP | None | Active |
+| **Bot Agent** | Mineflayer bot; 50ms reactive layer + skill modules | None | Active |
+| **World State Service** | Goal board, POIs, resources, infrastructure (MongoDB) | None | Active |
+| **Shared Types** | Frozen versioned message protocol + config schemas | None | Active |
+| ~~Orchestrator Service~~ | ~~Strategic planner~~ | ~~Gemini 1.5 Pro~~ | Archived |
+| ~~Squad Leader~~ | ~~Tactical commander~~ | ~~Gemini 1.5 Flash~~ | Archived |
+
+---
+
+## ✅ COMPLETED (historical)
 
 ### World State Service
 - ✅ Winston logger integrated (replaced all console.log)
@@ -361,14 +386,16 @@ const result = await apiCall();
 4. **Squad Leader** - MEDIUM (circuit breaker + LLM cache)
 5. **Bot Agent** - LOW (logger + config sufficient)
 
-## 📊 Current Stats
+## 📊 Stats (historical — pre-overhaul)
+
+> The Orchestrator and Squad Leader rows below refer to the now-archived packages.
 
 | Service | console.log Count | Lines | Integration % |
 |---------|------------------|-------|---------------|
 | World State | 0 | 355 | ✅ 100% |
-| Orchestrator | 0 | 983 | ✅ 100% |
+| ~~Orchestrator~~ (archived) | 0 | 983 | ✅ 100% |
 | BSM | 0 | 627 | ✅ 100% |
-| Squad Leader | 0 | 708 | ✅ 100% |
+| ~~Squad Leader~~ (archived) | 0 | 708 | ✅ 100% |
 | Bot Agent | 0 | 1085 | ✅ 100% |
 
 ## 🚀 Quick Integration Script

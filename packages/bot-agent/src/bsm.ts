@@ -1,10 +1,15 @@
 import net from 'net';
 import { EventEmitter } from 'events';
 import { AgentEvent, AgentStatusSnapshot, TaskObject } from '@aetherius/shared-types';
-import { createLogger, metrics } from '@aetherius/shared-types';
+import { createLogger, metrics, TcpMsgType, parseTcpMessage } from '@aetherius/shared-types';
 import { BehaviorAlert } from './behavior/alerts';
 
 const logger = createLogger('bot-agent:bsm');
+
+export interface BSMClientOptions {
+  /** Optional shared secret presented to the BSM on TCP registration (design [D]). */
+  authToken?: string;
+}
 
 export class BSMClient extends EventEmitter {
   private socket: net.Socket | null = null;
@@ -13,12 +18,14 @@ export class BSMClient extends EventEmitter {
   private agentId: string;
   private host: string;
   private port: number;
+  private authToken?: string;
 
-  constructor(agentId: string, host: string, port: number) {
+  constructor(agentId: string, host: string, port: number, options: BSMClientOptions = {}) {
     super();
     this.agentId = agentId;
     this.host = host;
     this.port = port;
+    this.authToken = options.authToken;
   }
 
   get registered(): boolean {
@@ -34,9 +41,12 @@ export class BSMClient extends EventEmitter {
     this.socket = net.createConnection({ host: this.host, port: this.port }, () => {
       logger.info('Connected to BSM TCP server.');
       metrics.increment('bsm_connections');
-      const registrationMessage = { type: 'register', payload: { agentId: this.agentId } };
-      this.send(registrationMessage);
       this.isRegistered = true;
+      const registrationMessage = {
+        type: TcpMsgType.Register,
+        payload: { agentId: this.agentId, authToken: this.authToken },
+      };
+      this.send(registrationMessage);
       this.emit('registered');
     });
 
@@ -46,23 +56,39 @@ export class BSMClient extends EventEmitter {
       while (boundary !== -1) {
         const messageString = this.messageBuffer.substring(0, boundary);
         this.messageBuffer = this.messageBuffer.substring(boundary + 1);
-        try {
-          const message = JSON.parse(messageString);
-          if (message.type === 'command' && message.payload) {
-            this.emit('command', message.payload.taskId, message.payload.task as TaskObject, message.payload.completionCondition);
-          } else if (message.type === 'updateProfile' && message.payload) {
-            this.emit('updateProfile', message.payload);
-          } else if (message.type === 'cancelTask' && message.payload) {
-            this.emit('cancelTask', message.payload.taskId);
-          } else if (message.type === 'chatMessage' && message.payload) {
-            this.emit('chatMessage', message.payload.message);
-          } else {
-            logger.warn(`Unknown BSM message type: ${message.type}`);
-          }
-        } catch (error) {
-          logger.error('Failed to parse BSM message:', error);
+        boundary = this.messageBuffer.indexOf('\n'); // Pre-advance so `continue` is safe.
+
+        // --- Boundary validation (design [E]) ---
+        const parsed = parseTcpMessage(messageString);
+        if (!parsed.ok) {
+          logger.warn(`Dropping invalid TCP frame from BSM: ${parsed.error}`);
+          metrics.increment('bsm_invalid_messages');
+          continue;
         }
-        boundary = this.messageBuffer.indexOf('\n');
+        const message = parsed.value;
+        const payload = (message.payload ?? {}) as Record<string, any>;
+
+        switch (message.type) {
+          case TcpMsgType.Command:
+            if (message.payload) {
+              this.emit('command', payload.taskId, payload.task as TaskObject, payload.completionCondition);
+            }
+            break;
+          case TcpMsgType.UpdateProfile:
+            if (message.payload) this.emit('updateProfile', payload);
+            break;
+          case TcpMsgType.CancelTask:
+            if (message.payload) this.emit('cancelTask', payload.taskId);
+            break;
+          case TcpMsgType.ChatMessage:
+            if (message.payload) this.emit('chatMessage', payload.message);
+            break;
+          case TcpMsgType.RegisterAck:
+            logger.info('Received registration ack from BSM.');
+            break;
+          default:
+            logger.warn(`Unknown BSM message type: ${message.type}`);
+        }
       }
     });
 
@@ -111,7 +137,23 @@ export class BSMClient extends EventEmitter {
 
     metrics.increment('events_reported');
     metrics.increment(`event_${event.eventType}`);
-    this.send(fullEvent);
+    this.send({ type: TcpMsgType.Event, payload: fullEvent });
+  }
+
+  /**
+   * Immediately acknowledge a received command (design [A] step 3). Sent BEFORE
+   * the task begins executing so the coordinator can transition the agent out of
+   * its 'pending' state (accepted -> 'busy', rejected -> 'idle' + replan).
+   */
+  sendCommandAck(taskId: string, accepted: boolean, reason?: string): void {
+    const payload: { agentId: string; taskId: string; accepted: boolean; reason?: string } = {
+      agentId: this.agentId,
+      taskId,
+      accepted,
+    };
+    if (reason !== undefined) payload.reason = reason;
+    metrics.increment('command_acks_sent');
+    this.send({ type: TcpMsgType.CommandAck, payload });
   }
 
   reportBehaviorAlert(alert: BehaviorAlert): void {
@@ -122,13 +164,13 @@ export class BSMClient extends EventEmitter {
   }
 
   reportStatusUpdate(snapshot: AgentStatusSnapshot): void {
-    const message = {
+    const fullSnapshot = {
       ...snapshot,
       agentId: this.agentId,
       timestamp: new Date().toISOString(),
       destination: 'commander',
     };
-    this.send(message);
+    this.send({ type: TcpMsgType.StatusUpdate, payload: fullSnapshot });
   }
 
   destroy(): void {

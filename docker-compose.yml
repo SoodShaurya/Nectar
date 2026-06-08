@@ -1,20 +1,28 @@
-version: '3.8'
+# Aetherius — autonomous Minecraft agent swarm.
+#
+# Current architecture (post architecture-overhaul):
+#   mongo                -> persistence for world-state-service
+#   world-state-service  -> strategic memory (HTTP 3000 / WS 3001)
+#   bot-server-manager   -> agent lifecycle + relay (WS 4000 upstream / TCP 4001 agents)
+#   coordinator          -> conversational planner (HTTP 5000 / WS 5001)
+#
+# The old 3-tier orchestrator + squad-leader services have been removed.
+# Secrets are passed through from the host environment / .env via ${VAR}.
 
 services:
-  mongodb:
+  mongo:
     image: mongo:7
-    container_name: aetherius-mongodb
+    container_name: aetherius-mongo
     restart: unless-stopped
     ports:
       - "27017:27017"
     volumes:
       - mongo-data:/data/db
-      - mongo-config:/data/configdb
     healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
       interval: 10s
       timeout: 5s
-      retries: 3
+      retries: 5
       start_period: 10s
     networks:
       - aetherius-network
@@ -26,27 +34,51 @@ services:
     container_name: aetherius-world-state
     restart: unless-stopped
     depends_on:
-      mongodb:
+      mongo:
         condition: service_healthy
     environment:
-      - NODE_ENV=${NODE_ENV:-production}
-      - LOG_LEVEL=${LOG_LEVEL:-info}
-      - MONGO_URI=mongodb://mongodb:27017/aetherius_world_state
-      - PORT=3000
-      - WS_PORT=3001
+      NODE_ENV: ${NODE_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      PORT: 3000
+      WS_PORT: 3001
+      MONGO_URI: mongodb://mongo:27017/aetherius_world_state
     ports:
       - "3000:3000"
       - "3001:3001"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      # node-based check so we don't depend on curl being present in the slim image.
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 15s
       timeout: 5s
       retries: 3
       start_period: 20s
     networks:
       - aetherius-network
-    volumes:
-      - ./logs:/app/logs
+
+  coordinator:
+    build:
+      context: .
+      dockerfile: packages/coordinator/Dockerfile
+    container_name: aetherius-coordinator
+    restart: unless-stopped
+    depends_on:
+      world-state-service:
+        condition: service_healthy
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      COORDINATOR_PORT: 5000
+      COORDINATOR_WS_PORT: 5001
+      WORLD_STATE_API_ADDRESS: http://world-state-service:3000
+      MC_VERSION: ${MC_VERSION:-1.21.1}
+      # Optional shared secret. When set, BSMs must present a matching token.
+      CLUSTER_AUTH_TOKEN: ${CLUSTER_AUTH_TOKEN:-}
+    ports:
+      - "5000:5000"
+      - "5001:5001"
+    networks:
+      - aetherius-network
 
   bot-server-manager:
     build:
@@ -57,51 +89,28 @@ services:
     depends_on:
       world-state-service:
         condition: service_healthy
+      coordinator:
+        condition: service_started
     environment:
-      - NODE_ENV=${NODE_ENV:-production}
-      - LOG_LEVEL=${LOG_LEVEL:-info}
-      - BSM_WS_PORT=4000
-      - BSM_AGENT_PORT=4001
-      - ORCHESTRATOR_ADDRESS=${ORCHESTRATOR_ADDRESS:-ws://orchestrator:5001}
-      - WORLD_STATE_API_ADDRESS=http://world-state-service:3000
-      - MC_HOST=${MC_HOST}
-      - MC_PORT=${MC_PORT:-25565}
-      - MC_VERSION=${MC_VERSION:-1.20.1}
+      NODE_ENV: ${NODE_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      BSM_WS_PORT: 4000
+      BSM_AGENT_PORT: 4001
+      COORDINATOR_ADDRESS: ws://coordinator:5001
+      WORLD_STATE_API_ADDRESS: http://world-state-service:3000
+      # Minecraft server the spawned agents connect to.
+      MC_HOST: ${MC_HOST}
+      MC_PORT: ${MC_PORT:-25565}
+      MC_VERSION: ${MC_VERSION:-1.21.1}
+      # Optional shared secret; presented to the coordinator and required from agents.
+      CLUSTER_AUTH_TOKEN: ${CLUSTER_AUTH_TOKEN:-}
     ports:
       - "4000:4000"
       - "4001:4001"
     networks:
       - aetherius-network
-    volumes:
-      - ./logs:/app/logs
 
-  orchestrator:
-    build:
-      context: .
-      dockerfile: packages/orchestrator-service/Dockerfile
-    container_name: aetherius-orchestrator
-    restart: unless-stopped
-    depends_on:
-      world-state-service:
-        condition: service_healthy
-      bot-server-manager:
-        condition: service_started
-    environment:
-      - NODE_ENV=${NODE_ENV:-production}
-      - LOG_LEVEL=${LOG_LEVEL:-info}
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - ORCHESTRATOR_PORT=5000
-      - ORCHESTRATOR_WS_PORT=5001
-      - WORLD_STATE_API_ADDRESS=http://world-state-service:3000
-    ports:
-      - "5000:5000"
-      - "5001:5001"
-    networks:
-      - aetherius-network
-    volumes:
-      - ./logs:/app/logs
-
-  # Optional: Frontend service
+  # Frontend is currently a stub — enable once packages/frontend ships a Dockerfile.
   # frontend:
   #   build:
   #     context: .
@@ -109,7 +118,7 @@ services:
   #   container_name: aetherius-frontend
   #   restart: unless-stopped
   #   depends_on:
-  #     - orchestrator
+  #     - coordinator
   #   ports:
   #     - "8080:8080"
   #   networks:
@@ -121,6 +130,4 @@ networks:
 
 volumes:
   mongo-data:
-    driver: local
-  mongo-config:
     driver: local

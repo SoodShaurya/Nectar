@@ -160,7 +160,7 @@ export class GoalBoard {
       for (const g of active) {
         const agents = g.assignedAgents.length > 0 ? g.assignedAgents.join(', ') : 'none';
         lines.push(`- [${g.priority}] ${g.goalId}: "${g.description}" (type: ${g.type}, agents: ${agents})`);
-        if (Object.keys(g.state).length > 0) {
+        if (g.state && Object.keys(g.state).length > 0) {
           lines.push(`  State: ${JSON.stringify(g.state)}`);
         }
       }

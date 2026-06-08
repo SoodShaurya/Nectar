@@ -3,9 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "description": "Aetherius: Autonomous Minecraft Agent Swarm",
+  "packageManager": "pnpm@10.33.0",
   "scripts": {
     "test": "vitest run",
-    "build": "pnpm -r --filter=\"./packages/**\" --filter=\"!./packages/_archived_*\" run build"
+    "build": "pnpm -r --filter=\"./packages/**\" --filter=\"!./packages/_archived_*\" run build",
+    "clean": "pnpm -r --filter=\"./packages/**\" --filter=\"!./packages/_archived_*\" exec rm -rf dist tsconfig.tsbuildinfo",
+    "build:clean": "pnpm run clean && pnpm run build"
   },
   "keywords": [
     "minecraft",

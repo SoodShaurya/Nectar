@@ -8,73 +8,68 @@ An ambitious multi-agent system designed to autonomously complete complex object
 
 ## 🎯 Overview
 
-Aetherius is a distributed, collaborative multi-agent system that uses:
-- **Strategic AI Planning** (Gemini 1.5 Pro) for high-level objectives
-- **Tactical AI Coordination** (Gemini 1.5 Flash) for squad-level execution
-- **Autonomous Agents** (Mineflayer) for in-game actions
-- **Shared World Knowledge** (MongoDB) for strategic memory
-- **Real-time Communication** (WebSockets) for coordination
+Aetherius is a distributed system built around a single conversational **Coordinator** that uses:
+- **Conversational AI Planning** (Gemini 3 Flash via `@google/genai`) that manages a goal board and dispatches tasks
+- **Deterministic Crafting Resolution** that expands crafting goals into task-trees without spending LLM tokens
+- **Autonomous Agents** (Mineflayer) with a 50ms reactive behavior layer plus skill modules for in-game actions
+- **Shared World Knowledge** (MongoDB) for the goal board, POIs, resources, and infrastructure
+- **Versioned, Validated Messaging** (WebSockets + TCP) for coordination across services
 
 ## 🏗️ Architecture
 
+The earlier three-tier design (Orchestrator + Squad Leaders + Agents) has been replaced by a single
+conversational Coordinator. The Coordinator talks to one or more Bot Server Managers (BSMs), each of which
+spawns and supervises Minecraft bot-agent processes.
+
 ```
 ┌─────────────┐
-│  Frontend   │ (Optional)
+│  Frontend   │ (stub: starts goals, monitors)
 │   (WebUI)   │
 └──────┬──────┘
-       │
+       │ frontend::startGoal (WS)
        ▼
-┌─────────────────────────────────┐
-│   Orchestrator Service          │ ◄─── Gemini 1.5 Pro (Strategic Planning)
-│   - Strategic Planning          │
-│   - Squad Management            │
-│   - Global Coordination         │
-└────────┬────────────────────────┘
-         │ spawns
-         ├──────────────┬──────────────┐
-         ▼              ▼              ▼
-    ┌─────────┐   ┌─────────┐   ┌─────────┐
-    │ Squad   │   │ Squad   │   │ Squad   │ ◄─── Gemini 1.5 Flash (Tactical)
-    │ Leader  │   │ Leader  │   │ Leader  │
-    └────┬────┘   └────┬────┘   └────┬────┘
-         │             │             │
-         └─────────────┼─────────────┘
-                       ▼
-         ┌──────────────────────────┐
-         │ Bot Server Manager (BSM) │
-         │  - Agent Lifecycle       │
-         │  - Message Routing       │
-         └────────┬─────────────────┘
-                  │ spawns & manages
-         ┌────────┼─────────┬────────┐
-         ▼        ▼         ▼        ▼
-    ┌────────┐┌────────┐┌────────┐┌────────┐
-    │ Agent  ││ Agent  ││ Agent  ││ Agent  │ ◄─── Mineflayer (Minecraft Bots)
+┌──────────────────────────────────────────────┐
+│   Coordinator                                 │ ◄─── Gemini 3 Flash (@google/genai)
+│   - Conversational planning                   │
+│   - MongoDB-persisted goal board              │
+│   - Deterministic crafting task-trees         │
+│   - Dispatches tasks directly to agents       │
+└───────┬──────────────────────────────┬────────┘
+        │ WS (coordinator::agentCommand)│ HTTP query/persist
+        ▼                               ▼
+┌──────────────────────────┐   ┌──────────────────────────────┐
+│ Bot Server Manager (BSM) │   │ World State Service           │ ◄─── MongoDB
+│  - Spawns/supervises      │   │  - Goal board                 │
+│    bot-agent processes    │   │  - POIs, resources            │
+│  - Routes WS <-> TCP      │   │  - Infrastructure             │
+│  - Bounded outbound queue │   └──────────────────────────────┘
+└────────┬─────────────────┘                ▲
+         │ TCP (command/event/ack)           │ HTTP reports
+         ┌────────┼─────────┬────────┐       │
+         ▼        ▼         ▼        ▼       │
+    ┌────────┐┌────────┐┌────────┐┌────────┐ │
+    │ Agent  ││ Agent  ││ Agent  ││ Agent  │─┘ ◄─ Mineflayer + 50ms reactive layer
     │   #1   ││   #2   ││   #3   ││   #N   │
     └────────┘└────────┘└────────┘└────────┘
-         │        │         │        │
-         └────────┴─────────┴────────┘
-                  │
-                  ▼
-    ┌──────────────────────────────┐
-    │ World State Service          │ ◄─── MongoDB (Strategic Memory)
-    │  - POIs, Resources           │
-    │  - Infrastructure            │
-    └──────────────────────────────┘
 ```
+
+Inter-service messages are **versioned and schema-validated** (see `@aetherius/shared-types`). Commands are
+**acknowledged**: the Coordinator marks an agent `pending` until the agent's ack is relayed back by the BSM,
+then `busy`. An optional shared secret (`CLUSTER_AUTH_TOKEN`) can be required for BSM and agent registration.
 
 ## 📦 Packages
 
-- **`orchestrator-service`** - Strategic AI planner and squad coordinator
-- **`squad-leader`** - Tactical AI commander for agent squads
-- **`bot-agent`** - Individual Minecraft bot with modular capabilities
-- **`bot-server-manager`** - Agent lifecycle and message routing
-- **`world-state-service`** - Persistent world knowledge (MongoDB + API)
-- **`shared-types`** - Common TypeScript types and utilities
-- **`pathfinder`** - Advanced A* pathfinding for Minecraft
-- **`combat`** - PvP combat system (bow & sword)
-- **`mineflayer-core`** - Custom Mineflayer build
-- **`frontend`** - Optional web UI (basic implementation)
+Active packages:
+- **`coordinator`** - Conversational planner; goal board, crafting task-trees, task dispatch (Gemini 3 Flash)
+- **`bot-agent`** - Mineflayer bot with a 50ms reactive behavior layer and skill modules
+- **`bot-server-manager`** - Spawns/supervises bot-agents; routes messages (WS ⇄ TCP)
+- **`world-state-service`** - Persistent world knowledge and goal board (MongoDB + API)
+- **`shared-types`** - Frozen message protocol, config schemas, and shared utilities
+- **`frontend`** - Optional web UI (stub)
+
+Archived (no longer built; under `packages/_archived_*`):
+- **`_archived_orchestrator-service`** - Former Gemini Pro strategic planner
+- **`_archived_squad-leader`** - Former Gemini Flash tactical commander
 
 ## 🚀 Quick Start
 
@@ -83,8 +78,8 @@ Aetherius is a distributed, collaborative multi-agent system that uses:
 - **Node.js** ≥ 20.x
 - **pnpm** ≥ 8.x (`npm install -g pnpm`)
 - **MongoDB** (local or cloud)
-- **Minecraft Server** (Java Edition, version 1.20.1 recommended)
-- **Google Gemini API Key** ([Get one here](https://makersuite.google.com/app/apikey))
+- **Minecraft Server** (Java Edition, version 1.21.1)
+- **Google Gemini API Key** ([Get one here](https://aistudio.google.com/app/apikey))
 
 ### Installation
 
@@ -111,9 +106,13 @@ nano .env
 ```
 
 **Required environment variables:**
-- `GEMINI_API_KEY` - Your Google Gemini API key
-- `MONGO_URI` - MongoDB connection string
-- `MC_HOST`, `MC_PORT`, `MC_VERSION` - Minecraft server details
+- `GEMINI_API_KEY` - Your Google Gemini API key (Coordinator)
+- `MONGO_URI` - MongoDB connection string (World State Service)
+- `MC_HOST`, `MC_PORT`, `MC_VERSION` - Minecraft server details (BSM / bot-agent)
+
+**Optional:**
+- `CLUSTER_AUTH_TOKEN` - Shared secret. When set on the Coordinator, BSMs must present a matching token to
+  register; when set on a BSM, agents must present a matching token. Leave unset to disable auth for local dev.
 
 ### Running the System
 
@@ -126,12 +125,15 @@ mongod --dbpath /path/to/data
 # Terminal 2: World State Service
 pnpm --filter @aetherius/world-state-service start
 
-# Terminal 3: Bot Server Manager
+# Terminal 3: Bot Server Manager (BSM)
 pnpm --filter @aetherius/bot-server-manager start
 
-# Terminal 4: Orchestrator
-pnpm --filter @aetherius/orchestrator-service start
+# Terminal 4: Coordinator
+pnpm --filter @aetherius/coordinator start
 ```
+
+The Coordinator listens for BSM WebSocket connections; each BSM connects upstream to the Coordinator
+(`COORDINATOR_ADDRESS`, default `ws://localhost:5001`) and spawns bot-agents on demand.
 
 ## 🛠️ Development
 
@@ -145,7 +147,7 @@ pnpm run build
 # In separate terminals
 pnpm --filter @aetherius/shared-types run watch
 pnpm --filter @aetherius/bot-agent run watch
-pnpm --filter @aetherius/orchestrator-service run watch
+pnpm --filter @aetherius/coordinator run watch
 ```
 
 ### Lint
@@ -156,36 +158,30 @@ pnpm run lint
 ## 📊 Current Status
 
 ### ✅ Completed
-- ✅ Core architecture implemented
+- ✅ Architecture overhaul: single conversational Coordinator (Gemini 3 Flash)
 - ✅ TypeScript monorepo structure
-- ✅ WebSocket communication system
-- ✅ Agent lifecycle management
+- ✅ Frozen, versioned, schema-validated message protocol (shared-types)
+- ✅ Command acknowledgment flow (pending → busy via agent ack)
+- ✅ MongoDB-persisted goal board
+- ✅ Deterministic crafting task-tree resolution
+- ✅ Agent lifecycle management (BSM spawns/supervises bot-agents)
 - ✅ World State Service with MongoDB
-- ✅ LLM integration (Gemini Pro & Flash)
-- ✅ Advanced pathfinding
-- ✅ Combat system (PvP)
-- ✅ Configuration validation
-- ✅ Logging infrastructure
-- ✅ Error handling & retry logic
-- ✅ Health checks
-- ✅ Circuit breakers
-- ✅ Rate limiting
-- ✅ Metrics collection
-- ✅ LLM response caching
+- ✅ Bot-agent 50ms reactive behavior layer + skill modules
+- ✅ Optional shared-secret auth (`CLUSTER_AUTH_TOKEN`)
+- ✅ Bounded outbound queues (no silent message drops)
+- ✅ Configuration validation, logging, health checks, metrics
 
 ### 🚧 In Progress
 - 🚧 Bot agent module implementations (exploration, mining, crafting)
 - 🚧 LLM prompt engineering and refinement
 - 🚧 End-to-end integration testing
-- 🚧 State persistence for agents
-- 🚧 Advanced squad coordination
+- 🚧 Frontend UI build-out
 
 ### 📋 Roadmap
-- Add unit and integration tests
+- Add more unit and integration tests
 - Implement advanced building system
-- Add more sophisticated agent roles
 - Improve error recovery mechanisms
-- Add web UI for monitoring
+- Build out web UI for monitoring
 - Performance optimizations
 - Multi-server support
 
@@ -194,28 +190,28 @@ pnpm run lint
 ### Manual Testing
 
 1. **Start the system** (all services running)
-2. **Trigger a goal** via Frontend or manual WebSocket message:
+2. **Trigger a goal** via the Frontend or a manual WebSocket message to the Coordinator (WS port 5001):
    ```json
    {
      "type": "frontend::startGoal",
      "payload": { "goal": "Gather 10 wood logs" }
    }
    ```
-3. **Monitor logs** to see the orchestrator plan, squad formation, and agent execution
+3. **Monitor logs** to see the Coordinator plan, update the goal board, and dispatch tasks to agents
 
 ### Monitoring
 
-- **Orchestrator**: Check strategic planning and squad management
-- **Squad Leaders**: Monitor tactical decisions and agent commands
+- **Coordinator**: Check conversational planning, goal-board updates, and task dispatch
+- **BSM**: Monitor agent spawn/supervision and message routing
 - **Agents**: Watch task execution and perception reports
 - **World State**: Query `http://localhost:3000/query` for stored data
 
 ### Health Checks
 
-Each service exposes a health endpoint (when implemented):
+Each service exposes a health endpoint:
 - World State Service: `http://localhost:3000/health`
-- Orchestrator: `http://localhost:5000/health`
-- BSM: `http://localhost:4000/health`
+- Coordinator: `http://localhost:5000/health`
+- BSM: `http://localhost:4002/health`
 
 ## 🐛 Troubleshooting
 
@@ -228,9 +224,10 @@ pnpm run build
 cat .env
 
 # Check if ports are available
-lsof -i :3000 # World State
-lsof -i :4000 # BSM
-lsof -i :5001 # Orchestrator WS
+lsof -i :3000 # World State HTTP
+lsof -i :4001 # BSM TCP (agents)
+lsof -i :4002 # BSM HTTP (health/metrics)
+lsof -i :5001 # Coordinator WS
 ```
 
 ### MongoDB Connection Issues
@@ -253,21 +250,22 @@ telnet localhost 25565
 
 ### Agent Not Spawning
 - Check BSM logs for spawn errors
-- Verify ORCHESTRATOR_ADDRESS is correct
-- Check that agent script path is valid
+- Verify the BSM's `COORDINATOR_ADDRESS` is correct (default `ws://localhost:5001`)
+- Check that the agent script path (`AGENT_SCRIPT_PATH`) is valid
 - Ensure MC_HOST/PORT/VERSION are correct
+- If `CLUSTER_AUTH_TOKEN` is set, ensure it matches between Coordinator, BSM, and agents
 
 ### LLM Errors
 - Verify GEMINI_API_KEY is valid
-- Check rate limits (60 calls/minute for Pro, 1500/minute for Flash)
-- Monitor circuit breaker state in logs
+- Check Gemini API rate limits / quota for your account
+- Monitor the Coordinator logs for retries and errors
 
 ## 📚 Documentation
 
+- [User Guide](./USER_GUIDE.md) - Operating, monitoring, and deploying the system
 - [Development Guide](./DEVELOPMENT_GUIDE.md) - Detailed setup and development instructions
-- [Architecture Plan](./AETHERIUS_PLAN.md) - Complete system design and roadmap
-- [Pathfinder API](./packages/pathfinder/docs/API.md) - Pathfinding documentation
-- [Combat API](./packages/combat/src/sword/API.md) - Combat system documentation
+- [Architecture Plan](./AETHERIUS_PLAN.md) - Historical (pre-overhaul) design notes
+- [Integration Status](./INTEGRATION_STATUS.md) - Historical (pre-overhaul) integration log
 
 ## 🤝 Contributing
 

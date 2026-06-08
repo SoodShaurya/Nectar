@@ -139,7 +139,7 @@ export interface AgentEvent {
   eventType: AgentEventType;
   timestamp: string; // ISO8601 format
   details: AgentEventDetails;
-  destination: string; // squadLeaderId or "orchestrator" or "world_state_service"
+  destination: string; // "coordinator" or "world_state_service"
 }
 
 export type AgentEventType =
@@ -246,7 +246,7 @@ export interface BehaviorAlertDetails {
 
 /**
  * Represents a periodic status update from an agent, distinct from events.
- * Used for Squad Leader context building.
+ * Used for coordinator context building.
  */
 export interface AgentStatusSnapshot {
   agentId: string;
@@ -268,16 +268,19 @@ export interface AgentStatusSnapshot {
     // Recent significant events (limited list for context)
     recentEvents?: string[]; // e.g., ["Took 5 damage", "Detected Skeleton"]
   };
-  destination: string; // squadLeaderId or "orchestrator"
+  destination: string; // "coordinator"
 }
 
 // --- WebSocket Message Structure ---
 
 /**
  * Generic structure for WebSocket messages between services.
+ * Use the `MsgType` constants and `parseWsMessage`/`makeWsMessage` helpers
+ * from `./protocol` rather than hand-writing type strings.
  */
 export interface WebSocketMessage<T = any> {
-    type: string; // e.g., "squadLeader::init", "agent::event::taskComplete"
+    v?: number; // Optional: protocol version (see PROTOCOL_VERSION)
+    type: string; // e.g., "coordinator::agentCommand", "agent::event::taskComplete"
     payload: T;
     senderId?: string; // Optional: ID of the sending service/instance
     timestamp?: string; // Optional: ISO8601
@@ -365,3 +368,4 @@ export * from './metrics';
 export * from './shutdown';
 export * from './llm-cache';
 export * from './health';
+export * from './protocol';

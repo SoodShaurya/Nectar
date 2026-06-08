@@ -6,7 +6,8 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/index.js", 
+    "start": "node dist/index.js",
+    "test:modules": "node dist/test-modules.js",
     "watch": "tsc -w"
   },
   "keywords": [
@@ -21,7 +22,7 @@
   "dependencies": {
     "@aetherius/shared-types": "workspace:*",
     "mineflayer": "^4.37.0",
-    "@nxg-org/mineflayer-pathfinder": "^0.0.26",
+    "mineflayer-pathfinder": "^2.4.5",
     "@nxg-org/mineflayer-custom-pvp": "^1.7.6",
     "@nxg-org/mineflayer-auto-eat": "^2.4.1",
     "@nxg-org/mineflayer-auto-armor": "^1.2.2",

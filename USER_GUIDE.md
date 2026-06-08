@@ -2,7 +2,8 @@
 
 **Autonomous Minecraft Agent Swarm System**
 
-A production-ready hierarchical AI system for managing autonomous Minecraft bot agents using Google Gemini AI for strategic and tactical planning.
+A system for managing autonomous Minecraft bot agents driven by a single conversational Coordinator
+(Google Gemini 3 Flash) that plans, maintains a persistent goal board, and dispatches tasks to agents.
 
 ---
 
@@ -23,56 +24,48 @@ A production-ready hierarchical AI system for managing autonomous Minecraft bot 
 
 ## Architecture Overview
 
-Aetherius uses a hierarchical architecture with 5 microservices:
+Aetherius is built around a single conversational **Coordinator** that dispatches tasks directly to agents
+through one or more Bot Server Managers (BSMs). The earlier Orchestrator + Squad Leader tiers have been
+removed (those packages are archived under `packages/_archived_*`).
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Orchestrator Service                      │
-│  Strategic AI Planning (Gemini 1.5 Pro)                     │
-│  - High-level goal decomposition                            │
-│  - Squad formation & mission assignment                     │
-│  - World state analysis                                     │
-└─────────────────┬──────────────────────┬────────────────────┘
-                  │                      │
-        ┌─────────▼──────────┐  ┌───────▼────────────┐
-        │   Squad Leader     │  │   Squad Leader     │
-        │ Tactical AI (Flash)│  │ Tactical AI (Flash)│
-        │ - Mission execution│  │ - Mission execution│
-        │ - Agent commands   │  │ - Agent commands   │
-        └─────────┬──────────┘  └───────┬────────────┘
-                  │                     │
-        ┌─────────▼─────────────────────▼───────────┐
-        │      Bot Server Manager (BSM)             │
-        │  - Agent lifecycle management             │
-        │  - Message routing (WS/TCP)               │
-        │  - Process supervision                    │
-        └─────────┬────────────────┬─────────────────┘
-                  │                │
-        ┌─────────▼──────┐  ┌─────▼────────┐
-        │   Bot Agent    │  │  Bot Agent   │
+                ┌───────────────────────────────────────────┐
+                │              Coordinator                   │
+                │  Conversational AI (Gemini 3 Flash)        │
+                │  - Goal board (MongoDB-persisted)          │
+                │  - Deterministic crafting task-trees       │
+                │  - Direct task dispatch to agents          │
+                └───────┬──────────────────────────┬─────────┘
+                        │ WS (commands/acks)        │ HTTP
+                        ▼                           ▼
+        ┌───────────────────────────┐   ┌───────────────────┐
+        │  Bot Server Manager (BSM) │   │ World State Svc    │
+        │  - Spawns/supervises       │   │  - MongoDB        │
+        │    bot-agent processes     │   │  - Goal board     │
+        │  - Routes WS ⇄ TCP         │   │  - POI tracking   │
+        │  - Bounded outbound queue  │   │  - Resource map   │
+        └─────────┬────────────────┬─┘   └───────────────────┘
+                  │ TCP            │ TCP            ▲
+        ┌─────────▼──────┐  ┌─────▼────────┐       │ HTTP reports
+        │   Bot Agent    │  │  Bot Agent   │───────┘
         │  - Minecraft   │  │  - Minecraft │
-        │  - Task exec   │  │  - Task exec │
-        └────────┬───────┘  └──────┬───────┘
-                 │                 │
-                 └────────┬────────┘
-                          │
-                ┌─────────▼─────────┐
-                │ World State Svc   │
-                │  - MongoDB        │
-                │  - POI tracking   │
-                │  - Resource map   │
-                └───────────────────┘
+        │  - 50ms react. │  │  - 50ms react│
+        │  - Skill mods  │  │  - Skill mods│
+        └────────────────┘  └──────────────┘
 ```
+
+Inter-service messages are versioned and schema-validated (see `@aetherius/shared-types`). Commands are
+acknowledged: the Coordinator marks an agent `pending` until the agent's ack is relayed back by the BSM,
+then `busy`. An optional `CLUSTER_AUTH_TOKEN` shared secret can be required for BSM/agent registration.
 
 ### Service Roles
 
 | Service | Role | AI Model | Port |
 |---------|------|----------|------|
-| **Orchestrator** | Strategic planning & squad management | Gemini 1.5 Pro | HTTP: 5000, WS: 5001 |
-| **Squad Leader** | Tactical execution & agent coordination | Gemini 1.5 Flash | Dynamic (spawned) |
+| **Coordinator** | Conversational planning, goal board, task dispatch | Gemini 3 Flash | HTTP: 5000, WS: 5001 |
 | **Bot Server Manager** | Agent lifecycle & message routing | None | HTTP: 4002, WS: 4000, TCP: 4001 |
-| **Bot Agent** | Minecraft interaction & task execution | None | Dynamic (spawned) |
-| **World State** | Persistent world knowledge | None | HTTP: 3000, WS: 3001 |
+| **Bot Agent** | Minecraft interaction & task execution | None | Connects to BSM TCP (4001) |
+| **World State** | Persistent world knowledge & goal board | None | HTTP: 3000, WS: 3001 |
 
 ---
 
@@ -81,22 +74,20 @@ Aetherius uses a hierarchical architecture with 5 microservices:
 ### System Requirements
 
 - **OS**: Linux, macOS, or Windows (WSL recommended)
-- **Node.js**: v18.0.0 or higher
+- **Node.js**: v20.0.0 or higher
 - **pnpm**: v8.0.0 or higher
 - **MongoDB**: v5.0 or higher
 - **Memory**: Minimum 4GB RAM (8GB+ recommended)
-- **Minecraft Server**: 1.20.1 (or configure version)
+- **Minecraft Server**: 1.21.1
 
 ### Required Accounts
 
-1. **Google Cloud Account** with Gemini API access
+1. **Google Gemini API access**
    - Get API key from: https://aistudio.google.com/app/apikey
-   - Quota needed:
-     - Gemini 1.5 Pro: 60 requests/minute
-     - Gemini 1.5 Flash: 1500 requests/minute
+   - The Coordinator uses the Gemini 3 Flash model (`@google/genai`)
 
 2. **Minecraft Server** (self-hosted or third-party)
-   - Java Edition 1.20.1
+   - Java Edition 1.21.1
    - Must allow bot connections
 
 ---
@@ -124,16 +115,13 @@ This installs all dependencies for the monorepo workspace.
 pnpm run build
 ```
 
-Expected output:
+Expected output (active packages; archived packages are excluded from the build):
 ```
 ✓ packages/shared-types build: Done
-✓ packages/pathfinder build: Done
-✓ packages/combat build: Done
+✓ packages/world-state-service build: Done
 ✓ packages/bot-agent build: Done
 ✓ packages/bot-server-manager build: Done
-✓ packages/orchestrator-service build: Done
-✓ packages/squad-leader build: Done
-✓ packages/world-state-service build: Done
+✓ packages/coordinator build: Done
 ```
 
 ### 4. Start MongoDB
@@ -160,45 +148,45 @@ mongod --dbpath /path/to/data
 Create a `.env` file in the project root:
 
 ```bash
-# --- Google Gemini AI ---
+# --- Google Gemini AI (Coordinator) ---
 GEMINI_API_KEY=your-gemini-api-key-here
 
-# --- MongoDB ---
+# --- MongoDB (World State Service) ---
 MONGO_URI=mongodb://admin:password@localhost:27017/aetherius?authSource=admin
 
 # --- World State Service ---
-WORLD_STATE_PORT=3000
-WORLD_STATE_WS_PORT=3001
+PORT=3000          # HTTP
+WS_PORT=3001       # WebSocket
 
-# --- Orchestrator Service ---
-ORCHESTRATOR_PORT=5000
-ORCHESTRATOR_WS_PORT=5001
+# --- Coordinator ---
+COORDINATOR_PORT=5000        # HTTP
+COORDINATOR_WS_PORT=5001     # WebSocket (BSMs connect in)
 WORLD_STATE_API_ADDRESS=http://localhost:3000
-SQUAD_LEADER_SCRIPT_PATH=./packages/squad-leader/dist/index.js
+MC_VERSION=1.21.1
 
-# --- Bot Server Manager ---
+# --- Bot Server Manager (BSM) ---
 BSM_ID=bsm-main
-BSM_WS_PORT=4000
-BSM_AGENT_PORT=4001
-BSM_HTTP_PORT=4002
+BSM_WS_PORT=4000             # upstream WS (legacy/optional)
+BSM_AGENT_PORT=4001          # TCP port agents connect to
+BSM_HTTP_PORT=4002           # health/metrics
 BSM_HOST=127.0.0.1
+COORDINATOR_ADDRESS=ws://localhost:5001   # upstream Coordinator (preferred)
 AGENT_SCRIPT_PATH=../bot-agent/dist/index.js
+MC_HOST=localhost
+MC_PORT=25565
+MC_VERSION=1.21.1
 
-# --- Squad Leader (template) ---
-SQUAD_ID=squad-001
-ORCHESTRATOR_ADDRESS=ws://localhost:5001
-
-# --- Bot Agent (template) ---
+# --- Bot Agent (template; usually spawned by the BSM) ---
 AGENT_ID=agent-001
 MC_HOST=localhost
 MC_PORT=25565
-MC_VERSION=1.20.1
+MC_VERSION=1.21.1
+MC_AUTH=offline              # or "microsoft" (set MC_USERNAME for online-mode)
 BSM_HOST=127.0.0.1
 BSM_TCP_PORT=4001
 
-# --- Logging ---
-LOG_LEVEL=info
-LOG_FILE=./logs/aetherius.log
+# --- Optional shared-secret auth (set the SAME value everywhere, or leave unset) ---
+CLUSTER_AUTH_TOKEN=
 ```
 
 ### Service-Specific Configuration
@@ -208,33 +196,35 @@ Each service validates its configuration using Zod schemas. Missing required var
 #### Required Variables by Service
 
 **World State Service:**
-- `MONGO_URI` - MongoDB connection string
-- `WORLD_STATE_PORT` - HTTP port (default: 3000)
-- `WORLD_STATE_WS_PORT` - WebSocket port (default: 3001)
+- `MONGO_URI` - MongoDB connection string (required)
+- `PORT` - HTTP port (default: 3000)
+- `WS_PORT` - WebSocket port (default: 3001)
 
-**Orchestrator Service:**
-- `GEMINI_API_KEY` - Google Gemini API key
-- `ORCHESTRATOR_PORT` - HTTP port (default: 5000)
-- `ORCHESTRATOR_WS_PORT` - WebSocket port (default: 5001)
-- `WORLD_STATE_API_ADDRESS` - World State HTTP endpoint
+**Coordinator:**
+- `GEMINI_API_KEY` - Google Gemini API key (required)
+- `COORDINATOR_PORT` - HTTP port (default: 5000)
+- `COORDINATOR_WS_PORT` - WebSocket port BSMs connect to (default: 5001)
+- `WORLD_STATE_API_ADDRESS` - World State HTTP endpoint (default: http://localhost:3000)
+- `MC_VERSION` - Minecraft version for crafting data (default: 1.21.1)
+- `CLUSTER_AUTH_TOKEN` - Optional shared secret BSMs must present to register
 
 **Bot Server Manager:**
-- `BSM_WS_PORT` - WebSocket port for commanders (default: 4000)
-- `BSM_AGENT_PORT` - TCP port for agents (default: 4001)
-- `ORCHESTRATOR_ADDRESS` - Orchestrator WebSocket endpoint
-- `WORLD_STATE_API_ADDRESS` - World State HTTP endpoint
-
-**Squad Leader:**
-- `GEMINI_API_KEY` - Google Gemini API key
-- `SQUAD_ID` - Unique squad identifier
-- `ORCHESTRATOR_ADDRESS` - Orchestrator WebSocket endpoint
+- `BSM_WS_PORT` - Upstream WebSocket port (default: 4000)
+- `BSM_AGENT_PORT` - TCP port agents connect to (default: 4001)
+- `BSM_HTTP_PORT` - HTTP health/metrics port (default: 4002)
+- `COORDINATOR_ADDRESS` - Coordinator WebSocket endpoint (default: ws://localhost:5001;
+  the deprecated alias `ORCHESTRATOR_ADDRESS` is still accepted with a warning)
+- `WORLD_STATE_API_ADDRESS` - World State HTTP endpoint (default: http://localhost:3000)
+- `MC_HOST` / `MC_PORT` / `MC_VERSION` - Minecraft server details passed to spawned agents
+- `CLUSTER_AUTH_TOKEN` - Optional shared secret presented upstream and required from agents
 
 **Bot Agent:**
 - `AGENT_ID` - Unique agent identifier
-- `MC_HOST` - Minecraft server hostname
-- `MC_PORT` - Minecraft server port
-- `BSM_HOST` - BSM hostname
-- `BSM_TCP_PORT` - BSM TCP port
+- `MC_HOST` / `MC_PORT` / `MC_VERSION` - Minecraft server details
+- `MC_AUTH` - `offline` (default) or `microsoft` (set `MC_USERNAME` for online-mode)
+- `BSM_HOST` - BSM hostname (default: 127.0.0.1)
+- `BSM_TCP_PORT` - BSM TCP port (default: 4001)
+- `CLUSTER_AUTH_TOKEN` - Optional shared secret presented to the BSM on registration
 
 ---
 
@@ -256,10 +246,14 @@ node dist/index.js
 cd packages/bot-server-manager
 node dist/index.js
 
-# Terminal 4: Orchestrator Service
-cd packages/orchestrator-service
+# Terminal 4: Coordinator
+cd packages/coordinator
 node dist/index.js
 ```
+
+The Coordinator listens for BSM WebSocket connections on port 5001; the BSM connects upstream to it
+(`COORDINATOR_ADDRESS`) and spawns bot-agents on demand. You can also use
+`pnpm --filter @aetherius/<service> start` instead of `node dist/index.js`.
 
 ### Development Mode (Automated)
 
@@ -308,8 +302,8 @@ module.exports = {
       max_memory_restart: '500M'
     },
     {
-      name: 'orchestrator',
-      script: './packages/orchestrator-service/dist/index.js',
+      name: 'coordinator',
+      script: './packages/coordinator/dist/index.js',
       instances: 1,
       autorestart: true,
       watch: false,
@@ -341,7 +335,7 @@ All services expose health check endpoints:
 # World State Service
 curl http://localhost:3000/health
 
-# Orchestrator Service
+# Coordinator
 curl http://localhost:5000/health
 
 # Bot Server Manager
@@ -351,10 +345,10 @@ curl http://localhost:4002/health
 **Healthy Response:**
 ```json
 {
-  "service": "orchestrator-service",
+  "service": "coordinator",
   "version": "0.1.0",
   "status": "healthy",
-  "timestamp": "2025-11-19T10:30:00.000Z",
+  "timestamp": "2026-06-08T10:30:00.000Z",
   "dependencies": {
     "world-state-service": { "status": "connected" },
     "gemini-api": { "status": "connected" }
@@ -365,12 +359,12 @@ curl http://localhost:4002/health
 **Degraded Response:**
 ```json
 {
-  "service": "orchestrator-service",
+  "service": "coordinator",
   "status": "degraded",
   "dependencies": {
     "gemini-api": {
       "status": "degraded",
-      "error": "Circuit breaker open"
+      "error": "API unavailable"
     }
   }
 }
@@ -384,7 +378,7 @@ Get real-time metrics from each service:
 # World State Service metrics
 curl http://localhost:3000/metrics
 
-# Orchestrator Service metrics
+# Coordinator metrics
 curl http://localhost:5000/metrics
 
 # Bot Server Manager metrics
@@ -395,15 +389,14 @@ curl http://localhost:4002/metrics
 ```json
 {
   "counters": {
-    "strategic_planning_cycles": 45,
-    "llm_cache_hits": 18,
-    "llm_cache_misses": 27,
-    "squads_created": 12,
-    "agents_selected": 48,
+    "llm_invocations": 45,
+    "commands_dispatched": 38,
+    "command_acks_received": 36,
+    "goals_completed": 12,
     "world_state_queries_successful": 67
   },
   "histograms": {
-    "strategic_planning_duration": {
+    "llm_invocation_duration": {
       "count": 45,
       "min": 1234,
       "max": 8765,
@@ -411,10 +404,6 @@ curl http://localhost:4002/metrics
       "p50": 3200,
       "p95": 6500,
       "p99": 8100
-    },
-    "llm_strategic_call": {
-      "count": 27,
-      "mean": 2100
     }
   }
 }
@@ -422,24 +411,20 @@ curl http://localhost:4002/metrics
 
 ### Key Metrics to Monitor
 
-**Orchestrator Service:**
-- `strategic_planning_cycles` - Number of planning cycles executed
-- `llm_cache_hits` / `llm_cache_misses` - Cache efficiency (~40% hit rate expected)
-- `squads_created` / `squads_terminated` - Squad lifecycle
-- `strategic_planning_duration` - Planning performance (target: <5s p95)
-- `strategic_planning_errors` - LLM failures
+> Metric names below are representative; consult each service's source for the exact counters it emits.
 
-**Squad Leader:**
-- `tactical_planning_cycles` - Tactical planning frequency
-- `llm_tactical_cache_hits` / `llm_tactical_cache_misses` - Cache performance
-- `commands_sent` - Commands dispatched to agents
-- `missions_completed` / `missions_failed` - Success rate
-- `tactical_planning_duration` - Planning speed (target: <2s p95)
+**Coordinator:**
+- LLM planning cycles / invocations
+- Commands dispatched and acknowledgments received
+- Goal-board updates (goals created / completed / failed)
+- Command-ack timeouts and triggered replans
+- BSM connect/disconnect events
 
 **Bot Server Manager:**
 - `agents_spawned` / `agents_exited` - Agent lifecycle
 - `ws_connections` / `tcp_connections` - Connection health
-- `messages_forwarded_to_commander` - Message throughput
+- `agent_outbound_queued` / `agent_outbound_flushed` / `agent_outbound_dropped` - Outbound queue health
+- `ws_invalid_payloads` - Dropped messages that failed validation
 - `world_state_reports_sent` - World State updates
 
 **Bot Agent:**
@@ -472,11 +457,11 @@ All services use Winston for structured JSON logging.
 ```json
 {
   "level": "info",
-  "message": "Strategic planning cycle completed",
-  "service": "orchestrator-service",
-  "timestamp": "2025-11-19T10:30:15.234Z",
+  "message": "Coordinator planning cycle completed",
+  "service": "coordinator",
+  "timestamp": "2026-06-08T10:30:15.234Z",
   "durationMs": 3456,
-  "triggeredBy": "missionComplete"
+  "triggeredBy": "agent::commandAck"
 }
 ```
 
@@ -489,11 +474,11 @@ Use Grafana + Prometheus for visualization:
    - Scrape `/metrics` endpoints
 
 2. **Key Dashboard Panels:**
-   - LLM cache hit rate (target: 30-50%)
    - Planning cycle duration (p50, p95, p99)
-   - Squad success/failure rates
+   - Goal success/failure rates
+   - Command-ack latency and timeout rate
    - Agent connection stability
-   - Circuit breaker state
+   - Outbound queue depth / drop rate
 
 ---
 
@@ -542,37 +527,44 @@ Use Grafana + Prometheus for visualization:
 }
 ```
 
-### Orchestrator Service
+### Coordinator
 
-**Purpose:** Strategic AI planner and squad manager
+**Purpose:** Conversational AI planner, goal-board owner, and task dispatcher
 
 **Key Features:**
-- Gemini 1.5 Pro for high-level planning
-- Circuit breaker (5 failures, 60s reset)
-- LLM cache (5 min TTL, ~40% cost reduction)
-- Rate limiting (60 calls/minute)
-- Squad lifecycle management
-- Agent selection (tags, inventory, proximity)
+- Gemini 3 Flash (`@google/genai`) for conversational planning
+- MongoDB-persisted goal board (via the World State Service)
+- Deterministic crafting task-tree resolution (no LLM tokens spent on recipes)
+- Direct task dispatch to agents through BSMs, with command acknowledgments
+- Replans on command rejections, ack timeouts, and BSM disconnects
 
-**WebSocket Messages:**
+**WebSocket Messages** (constants from `@aetherius/shared-types`; the protocol is versioned + validated):
 ```typescript
 // From BSM
-{ type: 'bsm::register', payload: { bsmId, address, agents } }
+{ type: 'bsm::register',       payload: { bsmId, address, agents, authToken? } }
+{ type: 'agent::statusUpdate', payload: { /* agent status */ } }
+{ type: 'agent::commandAck',   payload: { agentId, taskId, accepted, reason? } }
+{ type: 'agent::event::*',     payload: { /* event */ } }
 
-// From Squad Leader
-{ type: 'squadLeader::statusUpdate', payload: { squadId, status, progress } }
-{ type: 'squadLeader::missionComplete', payload: { squadId, results } }
-{ type: 'squadLeader::missionFailed', payload: { squadId, reason } }
+// From Frontend
+{ type: 'frontend::register',  payload: { /* ... */ } }
+{ type: 'frontend::startGoal', payload: { goal } }
 
-// To Squad Leader
-{ type: 'squadLeader::init', payload: { squadId, missionDescription, assignedAgents } }
-{ type: 'squadLeader::terminate', payload: { reason } }
+// To BSM
+{ type: 'bsm::registerAck',     payload: { /* ack */ } }
+{ type: 'coordinator::agentCommand',   payload: { agentId, taskId, task, completionCondition } }
+{ type: 'coordinator::cancelTask',     payload: { agentId, taskId } }
+{ type: 'coordinator::spawnAgent',     payload: { /* ... */ } }
+{ type: 'coordinator::terminateAgent', payload: { agentId } }
 ```
 
-**LLM Tools:**
-- `delegateTaskToSquad` - Create squad and assign mission
-- `requestWorldStateQuery` - Query world knowledge
-- `setPlanRepresentation` - Update strategic plan
+**Command acknowledgment flow:**
+1. Coordinator sends `coordinator::agentCommand`; the agent is marked `pending` with a ~10s ack timeout.
+2. BSM forwards the command to the agent over TCP.
+3. The agent immediately replies with a command ack (accepted / rejected) before executing.
+4. BSM relays it upstream as `agent::commandAck`.
+5. On accept → agent becomes `busy`; on reject or ack timeout → agent returns to `idle`/`unknown` and the
+   Coordinator replans.
 
 ### Bot Server Manager
 
@@ -580,55 +572,27 @@ Use Grafana + Prometheus for visualization:
 
 **Key Features:**
 - Spawns/terminates bot agent processes
-- WebSocket server for Orchestrator/Squad Leaders
+- WebSocket connection upstream to the Coordinator
 - TCP server for bot agents
-- Intelligent message routing
-- Health checks for dependencies
+- Message routing with a bounded outbound FIFO queue (never silently drops; logs on cap)
+- Optional shared-secret validation for agent registration
+- Health checks and metrics on the HTTP port (4002)
 
 **Message Routing:**
 ```
-Agent → BSM (TCP) → Commander (WebSocket)
-Commander → BSM (WebSocket) → Agent (TCP)
+Agent → BSM (TCP) → Coordinator (WebSocket)
+Coordinator → BSM (WebSocket) → Agent (TCP)
 Agent → BSM → World State (HTTP)
 ```
 
 **Managed Process Lifecycle:**
-1. Orchestrator requests agent spawn
-2. BSM forks bot agent process
-3. Agent connects via TCP and registers
-4. BSM marks agent as "running"
-5. Commander sends commands via BSM
-6. Agent reports events/status via BSM
-7. BSM terminates agent on request (SIGTERM → SIGKILL)
-
-### Squad Leader
-
-**Purpose:** Tactical mission executor
-
-**Key Features:**
-- Gemini 1.5 Flash for fast tactical decisions
-- Circuit breaker (5 failures, 60s reset)
-- LLM cache (3 min TTL - faster than strategic)
-- Rate limiting (1500 calls/minute)
-- Multi-agent coordination
-- Event-driven replanning
-
-**Lifecycle:**
-1. Spawned by Orchestrator (fork)
-2. Connects to Orchestrator via WebSocket
-3. Receives init with mission + agents
-4. Connects to BSMs for agent communication
-5. Runs tactical planning loop
-6. Issues commands to agents
-7. Reports status/findings to Orchestrator
-8. Terminates on mission complete/fail
-
-**LLM Tools:**
-- `agentCommandBatch` - Send commands to multiple agents
-- `reportStatusToOrchestrator` - Update mission progress
-- `reportStrategicFindToOrchestrator` - Report important discoveries
-- `declareMissionComplete` - Mission succeeded
-- `declareMissionFailed` - Mission failed
+1. Coordinator requests an agent spawn (`coordinator::spawnAgent`)
+2. BSM forks the bot-agent process
+3. Agent connects via TCP and registers (with `authToken` if auth is enabled)
+4. BSM marks the agent as "running" and flushes any queued frames
+5. Coordinator sends commands via the BSM; the agent acks them
+6. Agent reports events/status via the BSM
+7. BSM terminates the agent on request (SIGTERM → SIGKILL)
 
 ### Bot Agent
 
@@ -695,28 +659,29 @@ ERROR: MongoDB connection failed
 
 **Symptom:**
 ```
-ERROR: Error during strategic planning LLM interaction
-WARN: Gemini API circuit breaker state changed: open
+ERROR: Error during Coordinator LLM interaction
+WARN: Gemini API request failed
 ```
 
 **Solutions:**
 1. Verify API key is valid: https://aistudio.google.com/app/apikey
-2. Check quota limits (60 req/min Pro, 1500 req/min Flash)
-3. Wait for circuit breaker reset (60 seconds)
-4. Check Gemini API status: https://status.cloud.google.com/
+2. Check your account's quota / rate limits for the Gemini 3 Flash model
+3. Check Gemini API status: https://status.cloud.google.com/
+4. Inspect Coordinator logs for the specific error and retry behavior
 
-### Squad Leader Not Spawning
+### Agent Not Spawning
 
 **Symptom:**
 ```
-ERROR: Error spawning squad leader process
+ERROR: Error spawning bot agent process
 ```
 
 **Solutions:**
-1. Check `SQUAD_LEADER_SCRIPT_PATH` points to built file
-2. Verify file exists: `ls packages/squad-leader/dist/index.js`
-3. Rebuild if missing: `pnpm --filter @aetherius/squad-leader run build`
-4. Check permissions: `chmod +x packages/squad-leader/dist/index.js`
+1. Check the BSM's `AGENT_SCRIPT_PATH` points to the built file
+2. Verify the file exists: `ls packages/bot-agent/dist/index.js`
+3. Rebuild if missing: `pnpm --filter @aetherius/bot-agent run build`
+4. Confirm `COORDINATOR_ADDRESS` is correct so the BSM can register upstream
+5. If `CLUSTER_AUTH_TOKEN` is set, make sure it matches across Coordinator, BSM, and agents
 
 ### Agent Can't Connect to Minecraft
 
@@ -729,8 +694,8 @@ ERROR: Bot agent-001 error: Error: connect ECONNREFUSED
 1. Verify Minecraft server is running
 2. Check `MC_HOST` and `MC_PORT` are correct
 3. Test connection: `telnet localhost 25565`
-4. Check Minecraft allows bot connections (online-mode, whitelist)
-5. Verify Minecraft version matches `MC_VERSION`
+4. Check Minecraft allows bot connections (online-mode, whitelist); set `MC_AUTH`/`MC_USERNAME` accordingly
+5. Verify Minecraft version matches `MC_VERSION` (1.21.1)
 
 ### High Memory Usage
 
@@ -738,21 +703,20 @@ ERROR: Bot agent-001 error: Error: connect ECONNREFUSED
 
 **Solutions:**
 1. Check for memory leaks in metrics
-2. Reduce LLM cache TTL (smaller cache)
-3. Limit concurrent squads
-4. Restart services periodically
-5. Use PM2 `max_memory_restart` option
+2. Limit the number of concurrent agents per BSM
+3. Restart services periodically
+4. Use PM2 `max_memory_restart` option
 
-### Circuit Breaker Stuck Open
+### Commands Not Being Acknowledged
 
-**Symptom:** Continuous "Circuit breaker open" warnings
+**Symptom:** Coordinator logs ack timeouts; agents stay `pending` then go back to `idle`
 
 **Solutions:**
-1. Check Gemini API is accessible
-2. Verify API key quota not exceeded
-3. Wait 60 seconds for automatic reset
-4. Restart service to force reset
-5. Increase `resetTimeout` if transient issues
+1. Confirm the BSM is connected to the Coordinator (`COORDINATOR_ADDRESS`)
+2. Confirm the agent is connected over TCP to the BSM (port 4001)
+3. Check for `CLUSTER_AUTH_TOKEN` mismatches (rejected registrations)
+4. Inspect BSM outbound-queue metrics for drops (`agent_outbound_dropped`)
+5. Check agent logs for command-handling errors
 
 ---
 
@@ -762,7 +726,7 @@ ERROR: Bot agent-001 error: Error: connect ECONNREFUSED
 
 ```bash
 # Build specific service
-pnpm --filter @aetherius/orchestrator-service run build
+pnpm --filter @aetherius/coordinator run build
 
 # Build with dependencies
 pnpm --filter @aetherius/bot-agent... run build
@@ -781,36 +745,42 @@ pnpm test
 pnpm --filter @aetherius/shared-types test
 
 # Watch mode
-pnpm --filter @aetherius/orchestrator-service test -- --watch
+pnpm --filter @aetherius/coordinator test -- --watch
 ```
+
+Tests run on [Vitest](https://vitest.dev/).
 
 ### Code Structure
 
 ```
 Nectar/
 ├── packages/
-│   ├── shared-types/          # Shared TypeScript types & utilities
+│   ├── shared-types/          # Frozen message protocol, config schemas & utilities
 │   │   ├── src/
 │   │   │   ├── logger.ts      # Winston logger factory
-│   │   │   ├── config.ts      # Zod schemas & validation
-│   │   │   ├── resilience.ts  # Circuit breaker, cache, rate limiter
+│   │   │   ├── config.ts      # Zod config schemas & validation
+│   │   │   ├── protocol*.ts   # Message types, envelopes, parsers, payload schemas
 │   │   │   ├── health.ts      # Health check utilities
 │   │   │   └── metrics.ts     # Metrics collection
 │   │   └── package.json
-│   ├── world-state-service/   # World knowledge database
-│   ├── orchestrator-service/  # Strategic AI planner
-│   ├── bot-server-manager/    # Agent lifecycle manager
-│   ├── squad-leader/          # Tactical AI executor
-│   ├── bot-agent/             # Minecraft bot
-│   ├── pathfinder/            # Pathfinding plugin
-│   └── combat/                # Combat plugin
+│   ├── world-state-service/   # World knowledge database + goal board
+│   ├── coordinator/           # Conversational AI planner & task dispatcher
+│   ├── bot-server-manager/    # Agent lifecycle manager & message router
+│   ├── bot-agent/             # Minecraft bot (50ms reactive layer + skill modules)
+│   ├── frontend/              # Optional web UI (stub)
+│   ├── _archived_orchestrator-service/  # Archived (not built)
+│   └── _archived_squad-leader/          # Archived (not built)
 ├── .env                       # Environment variables
 ├── ecosystem.config.js        # PM2 configuration
 ├── start-dev.sh              # Development startup script
 ├── stop-dev.sh               # Development shutdown script
-├── INTEGRATION_STATUS.md     # Integration progress
+├── INTEGRATION_STATUS.md     # Historical integration log
 └── USER_GUIDE.md             # This file
 ```
+
+> The exact filenames under `shared-types/src` may vary; the protocol module exports `PROTOCOL_VERSION`,
+> `MsgType`, `TcpMsgType`, `parseWsMessage`/`parseTcpMessage`, `makeWsMessage`, `validatePayload`, the Zod
+> payload schemas, and `checkAuthToken`.
 
 ### Adding New Features
 
@@ -873,7 +843,7 @@ pm2 status
 
 # Check health endpoints
 curl http://localhost:3000/health  # World State
-curl http://localhost:5000/health  # Orchestrator
+curl http://localhost:5000/health  # Coordinator
 curl http://localhost:4002/health  # BSM
 
 # View logs
@@ -887,8 +857,8 @@ watch -n 5 'curl -s http://localhost:5000/metrics | jq .'
 
 # Set up alerts for:
 # - Service down (health check failures)
-# - High error rates
-# - Circuit breaker open
+# - High error rates / LLM failures
+# - Command-ack timeouts
 # - Memory/CPU usage
 ```
 
@@ -897,20 +867,18 @@ watch -n 5 'curl -s http://localhost:5000/metrics | jq .'
 **Horizontal Scaling:**
 - Run multiple BSM instances with load balancing
 - Each BSM manages separate agent pools
-- Orchestrator connects to all BSMs
+- The Coordinator connects to all BSMs
 
 **Vertical Scaling:**
-- Orchestrator: 1-2 GB RAM (LLM cache)
-- Squad Leader: 512 MB RAM per instance
+- Coordinator: 1-2 GB RAM
 - BSM: 512 MB RAM + 100 MB per agent
 - Bot Agent: 100-200 MB RAM each
 - World State: 512 MB RAM + MongoDB size
 
 **Cost Optimization:**
-- LLM caching reduces API costs by ~40%
-- Monitor cache hit rates in metrics
-- Adjust cache TTL based on use case
-- Use Gemini Flash for tactical (25x cheaper)
+- The Coordinator resolves crafting goals deterministically (no LLM tokens spent on recipe expansion)
+- Gemini 3 Flash is a low-cost model well suited to the conversational planning loop
+- Monitor LLM invocation counts and durations in metrics
 
 ### Backup & Recovery
 
@@ -942,10 +910,10 @@ pm2 status
 pm2 logs
 
 # View logs (specific service)
-pm2 logs orchestrator
+pm2 logs coordinator
 
 # Restart service
-pm2 restart orchestrator
+pm2 restart coordinator
 
 # Stop all services
 pm2 stop all
@@ -974,12 +942,12 @@ curl http://localhost:4002/ | jq .
 | Service | HTTP | WebSocket | TCP |
 |---------|------|-----------|-----|
 | World State | 3000 | 3001 | - |
-| Orchestrator | 5000 | 5001 | - |
-| BSM | 4002 | 4000 | 4001 |
+| Coordinator | 5000 | 5001 | - |
+| BSM | 4002 | 4000 | 4001 (agents) |
 
 ### Support
 
-- **Documentation**: See README.md and INTEGRATION_STATUS.md
+- **Documentation**: See README.md
 - **Issues**: GitHub Issues
 - **Logs**: Check Winston logs for detailed errors
 - **Health**: Use `/health` endpoints for diagnostics
@@ -993,6 +961,6 @@ MIT License - See LICENSE file for details
 
 ---
 
-**Version**: 1.0.0
-**Last Updated**: 2025-11-19
-**Status**: Production Ready (5/5 services integrated)
+**Version**: 2.0.0 (architecture overhaul — conversational Coordinator)
+**Last Updated**: 2026-06-08
+**Status**: Active development

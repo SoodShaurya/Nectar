@@ -76,15 +76,15 @@ importers:
       '@nxg-org/mineflayer-custom-pvp':
         specifier: ^1.7.6
         version: 1.7.9
-      '@nxg-org/mineflayer-pathfinder':
-        specifier: ^0.0.26
-        version: 0.0.26
       minecraft-data:
         specifier: ^3.76.0
         version: 3.109.0
       mineflayer:
         specifier: ^4.37.0
         version: 4.37.0
+      mineflayer-pathfinder:
+        specifier: ^2.4.5
+        version: 2.4.5
       mineflayer-tool:
         specifier: ^1.2.0
         version: 1.2.0
@@ -286,12 +286,6 @@ packages:
   '@nxg-org/mineflayer-custom-pvp@1.7.9':
     resolution: {integrity: sha512-fA58AfHgNMqPOkETqPiTAtS596CugM83OQRJQcINWAM2pbhfvCA/tatETgy0VnYJtacEM9xNqUkgsKjLwIRf3Q==}
 
-  '@nxg-org/mineflayer-pathfinder@0.0.26':
-    resolution: {integrity: sha512-Tbx/ZqH2RInWfSxoi0jdJ4TZfB5Ol9PuhGSL1rclkDPfTM6RoPWIMpvb1N0f3f4gr3BpRCPmtUOEqZ5aS/Dhmw==}
-
-  '@nxg-org/mineflayer-physics-util@1.9.1':
-    resolution: {integrity: sha512-+mcHKpe2ugDElH6izhi4FH8jiZ42wl/mbkfdTmWISbDRagasSq3D48pGu0gCSDcp7mTgk3laDJfl/f1j42O64g==}
-
   '@nxg-org/mineflayer-smooth-look@1.1.2':
     resolution: {integrity: sha512-qmYELGxFAyuyJA3wlmH6qWrDhror7iWECh4xX0qHt6tSR+MwbHjowoL/6RQZv60qU6djTXopJ8Lfq2WhSVQjEw==}
 
@@ -372,36 +366,42 @@ packages:
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [arm64]
     os: [linux]
+    libc: [glibc]
 
   '@rolldown/binding-linux-arm64-musl@1.0.0-rc.15':
     resolution: {integrity: sha512-ZvRYMGrAklV9PEkgt4LQM6MjQX2P58HPAuecwYObY2DhS2t35R0I810bKi0wmaYORt6m/2Sm+Z+nFgb0WhXNcQ==}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [arm64]
     os: [linux]
+    libc: [musl]
 
   '@rolldown/binding-linux-ppc64-gnu@1.0.0-rc.15':
     resolution: {integrity: sha512-VDpgGBzgfg5hLg+uBpCLoFG5kVvEyafmfxGUV0UHLcL5irxAK7PKNeC2MwClgk6ZAiNhmo9FLhRYgvMmedLtnQ==}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [ppc64]
     os: [linux]
+    libc: [glibc]
 
   '@rolldown/binding-linux-s390x-gnu@1.0.0-rc.15':
     resolution: {integrity: sha512-y1uXY3qQWCzcPgRJATPSOUP4tCemh4uBdY7e3EZbVwCJTY3gLJWnQABgeUetvED+bt1FQ01OeZwvhLS2bpNrAQ==}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [s390x]
     os: [linux]
+    libc: [glibc]
 
   '@rolldown/binding-linux-x64-gnu@1.0.0-rc.15':
     resolution: {integrity: sha512-023bTPBod7J3Y/4fzAN6QtpkSABR0rigtrwaP+qSEabUh5zf6ELr9Nc7GujaROuPY3uwdSIXWrvhn1KxOvurWA==}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [x64]
     os: [linux]
+    libc: [glibc]
 
   '@rolldown/binding-linux-x64-musl@1.0.0-rc.15':
     resolution: {integrity: sha512-witB2O0/hU4CgfOOKUoeFgQ4GktPi1eEbAhaLAIpgD6+ZnhcPkUtPsoKKHRzmOoWPZue46IThdSgdo4XneOLYw==}
     engines: {node: ^20.19.0 || >=22.12.0}
     cpu: [x64]
     os: [linux]
+    libc: [musl]
 
   '@rolldown/binding-openharmony-arm64@1.0.0-rc.15':
     resolution: {integrity: sha512-UCL68NJ0Ud5zRipXZE9dF5PmirzJE4E4BCIOOssEnM7wLDsxjc6Qb0sGDxTNRTP53I6MZpygyCpY8Aa8sPfKPg==}
@@ -1000,24 +1000,28 @@ packages:
     engines: {node: '>= 12.0.0'}
     cpu: [arm64]
     os: [linux]
+    libc: [glibc]
 
   lightningcss-linux-arm64-musl@1.32.0:
     resolution: {integrity: sha512-UpQkoenr4UJEzgVIYpI80lDFvRmPVg6oqboNHfoH4CQIfNA+HOrZ7Mo7KZP02dC6LjghPQJeBsvXhJod/wnIBg==}
     engines: {node: '>= 12.0.0'}
     cpu: [arm64]
     os: [linux]
+    libc: [musl]
 
   lightningcss-linux-x64-gnu@1.32.0:
     resolution: {integrity: sha512-V7Qr52IhZmdKPVr+Vtw8o+WLsQJYCTd8loIfpDaMRWGUZfBOYEJeyJIkqGIDMZPwPx24pUMfwSxxI8phr/MbOA==}
     engines: {node: '>= 12.0.0'}
     cpu: [x64]
     os: [linux]
+    libc: [glibc]
 
   lightningcss-linux-x64-musl@1.32.0:
     resolution: {integrity: sha512-bYcLp+Vb0awsiXg/80uCRezCYHNg1/l3mt0gzHnWV9XP1W5sKa5/TCdGWaR/zBM2PeF/HbsQv/j2URNOiVuxWg==}
     engines: {node: '>= 12.0.0'}
     cpu: [x64]
     os: [linux]
+    libc: [musl]
 
   lightningcss-win32-arm64-msvc@1.32.0:
     resolution: {integrity: sha512-8SbC8BR40pS6baCM8sbtYDSwEVQd4JlFTOlaD3gWGHfThTcABnNDBda6eTZeqbofalIJhFx0qKzgHJmcPTnGdw==}
@@ -1068,9 +1072,6 @@ packages:
 
   long@5.3.2:
     resolution: {integrity: sha512-mNAgZ1GmyNhD7AuqnTG3/VQ26o760+ZYBPKjPvugO8+nLbYfX6TVpJPseBvopbdY+qpZ/lKUnmEc1LeZYS3QAA==}
-
-  lru-cache@10.4.3:
-    resolution: {integrity: sha512-JNAzZcXrCt42VGLuYz0zfAzDfAvJWW6AfYlDBQyDV5DClI2m5sAmK+OIO7s59XfsRsWHp02jAJrRadPRGTt6SQ==}
 
   macaddress@0.5.3:
     resolution: {integrity: sha512-vGBKTA+jwM4KgjGZ+S/8/Mkj9rWzePyGY6jManXPGhiWu63RYwW8dKPyk5koP+8qNVhPhHgFa1y/MJ4wrjsNrg==}
@@ -1805,16 +1806,6 @@ snapshots:
     transitivePeerDependencies:
       - encoding
       - supports-color
-
-  '@nxg-org/mineflayer-pathfinder@0.0.26':
-    dependencies:
-      '@nxg-org/mineflayer-physics-util': 1.9.1
-      '@nxg-org/mineflayer-util-plugin': 1.8.4
-      lru-cache: 10.4.3
-
-  '@nxg-org/mineflayer-physics-util@1.9.1':
-    dependencies:
-      '@nxg-org/mineflayer-util-plugin': 1.8.4
 
   '@nxg-org/mineflayer-smooth-look@1.1.2':
     dependencies:
@@ -2586,8 +2577,6 @@ snapshots:
       triple-beam: 1.4.1
 
   long@5.3.2: {}
-
-  lru-cache@10.4.3: {}
 
   macaddress@0.5.3: {}
 

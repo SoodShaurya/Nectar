@@ -46,7 +46,9 @@ let taskManager: TaskManager | null = null;
 let behaviorLayer: BehaviorLayer | null = null;
 
 // --- BSM Client ---
-const bsm = new BSMClient(AGENT_ID, config.BSM_HOST, config.BSM_TCP_PORT);
+const bsm = new BSMClient(AGENT_ID, config.BSM_HOST, config.BSM_TCP_PORT, {
+  authToken: config.CLUSTER_AUTH_TOKEN,
+});
 
 // --- Report helper for modules/services ---
 function reportEvent(event: { eventType: string; taskId?: string; details?: any }): void {
@@ -64,7 +66,6 @@ function initializeBot(): void {
     version: config.MC_VERSION,
     checkTimeoutInterval: 60 * 1000,
     plugins: {
-      pathfinder: require('@nxg-org/mineflayer-pathfinder').createPlugin(),
       combat: require('@nxg-org/mineflayer-custom-pvp'),
     },
   };
@@ -106,6 +107,8 @@ function initializeBot(): void {
   bot.once('spawn', () => {
     logger.info(`Bot ${AGENT_ID} spawned`);
     metrics.increment('bot_spawns');
+
+    // Pathfinder is loaded by NavigationModule.initialize()
     onBotSpawned();
   });
 
@@ -272,10 +275,16 @@ bsm.on('registered', () => {
 });
 
 bsm.on('command', (taskId: string, task: any, completionCondition?: any) => {
-  if (taskManager) {
-    taskManager.handleCommand(taskId, task, completionCondition);
-    behaviorLayer?.setActiveModule(taskManager.getCurrentModule());
+  if (!taskManager) {
+    // Not yet initialized (bot still spawning) — reject so the coordinator replans.
+    bsm.sendCommandAck(taskId, false, 'Agent not ready');
+    return;
   }
+  // Acknowledge immediately (design [A] step 3) based on the TaskManager's
+  // synchronous acceptance decision, BEFORE the task executes.
+  const result = taskManager.handleCommand(taskId, task, completionCondition);
+  bsm.sendCommandAck(taskId, result.accepted, result.reason);
+  behaviorLayer?.setActiveModule(taskManager.getCurrentModule());
 });
 
 bsm.on('cancelTask', (taskId: string) => {

@@ -1,0 +1,29 @@
+# Keep Docker build contexts small and reproducible.
+# node_modules and build output are regenerated inside the image.
+**/node_modules
+**/dist
+node_modules
+dist
+# TypeScript incremental cache: copying the host's stale *.tsbuildinfo makes tsc
+# skip emit inside the image (composite mode) and produce an empty dist. Never bake it in.
+**/*.tsbuildinfo
+
+# VCS / CI / local tooling
+.git
+.gitignore
+.github
+
+# Local env & logs (never bake secrets or local state into an image)
+.env
+.env.*
+!.env.example
+logs
+*.log
+
+# Editor / OS cruft
+.vscode
+.idea
+.DS_Store
+
+# Archived (excluded-from-build) packages
+packages/_archived_*

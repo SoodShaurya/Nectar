@@ -8,13 +8,18 @@
 import WebSocket, { WebSocketServer } from 'ws';
 import http from 'http';
 import {
-  WebSocketMessage,
   createLogger,
   validateConfig,
   coordinatorConfigSchema,
   createGracefulShutdown,
   HealthCheck,
   metrics,
+  MsgType,
+  parseWsMessage,
+  validatePayload,
+  bsmRegisterPayloadSchema,
+  commandAckPayloadSchema,
+  checkAuthToken,
 } from '@aetherius/shared-types';
 import { AgentManager } from './agents';
 import { WorldStateClient } from './world-state';
@@ -42,6 +47,17 @@ const llm = new CoordinatorLLM(
   config.MC_VERSION,
 );
 
+// AgentManager surfaces lifecycle changes that require the LLM to re-evaluate
+// (ack timeout, BSM disconnect with an active task). index.ts owns the LLM, so
+// it subscribes here and triggers a replan (design [A] step 6 / [B]).
+agents.on('replan', (info: { reason: string; agentId?: string; bsmId?: string }) => {
+  logger.info('Replan triggered by AgentManager', info);
+  llm.invoke({ type: 'replan', ...info });
+});
+
+// One-time warning that cluster auth is disabled (design [D]).
+let authDisabledWarned = false;
+
 // --- Frontend Clients ---
 const connectedFrontendClients: Set<WebSocket> = new Set();
 
@@ -54,23 +70,73 @@ wss.on('connection', (ws: WebSocket) => {
   metrics.increment('ws_connections');
 
   ws.on('message', (message: Buffer) => {
-    try {
-      const parsed: WebSocketMessage = JSON.parse(message.toString());
-      metrics.increment('ws_messages_received');
+    // Boundary validation (design [E]): parse + envelope-validate before use.
+    const parsedResult = parseWsMessage(message);
+    if (!parsedResult.ok) {
+      logger.warn('Dropping invalid WS message', { error: parsedResult.error });
+      metrics.increment('ws_messages_invalid');
+      return;
+    }
+    const parsed = parsedResult.value;
+    metrics.increment('ws_messages_received');
 
+    try {
       // --- BSM Registration ---
-      if (parsed.type === 'bsm::register') {
-        const { bsmId, address, capacity, agents: agentList } = parsed.payload;
-        if (bsmId && address && agentList && Array.isArray(agentList)) {
-          agents.registerBSM(bsmId, address, ws, agentList);
-        } else {
-          logger.error('Invalid bsm::register payload', { payload: parsed.payload });
+      if (parsed.type === MsgType.BsmRegister) {
+        const payloadResult = validatePayload(bsmRegisterPayloadSchema, parsed.payload);
+        if (!payloadResult.ok) {
+          logger.warn('Dropping invalid bsm::register payload', { error: payloadResult.error });
+          metrics.increment('ws_messages_invalid');
+          return;
+        }
+        // Use the ORIGINAL payload (validatePayload does not strip fields).
+        const payload = parsed.payload as {
+          bsmId: string; address: string; capacity?: number;
+          agents: Array<{ agentId: string; status?: string }>; authToken?: string;
+        };
+
+        // Auth handshake (design [D]).
+        if (!config.CLUSTER_AUTH_TOKEN && !authDisabledWarned) {
+          logger.warn('Cluster auth is DISABLED (CLUSTER_AUTH_TOKEN unset) — accepting all BSM registrations');
+          authDisabledWarned = true;
+        }
+        if (!checkAuthToken(config.CLUSTER_AUTH_TOKEN, payload.authToken)) {
+          logger.warn('Rejecting bsm::register — invalid auth token', { bsmId: payload.bsmId });
+          metrics.increment('bsm_auth_rejected');
+          ws.close();
+          return;
+        }
+
+        agents.registerBSM(payload.bsmId, payload.address, ws, payload.agents);
+      }
+
+      // --- Command Acknowledgments (relayed by BSM) ---
+      else if (parsed.type === MsgType.AgentCommandAck) {
+        // Boundary validation (design [E]): the ack is a high-value lifecycle payload.
+        const ackResult = validatePayload(commandAckPayloadSchema, parsed.payload);
+        if (!ackResult.ok) {
+          logger.warn('Dropping invalid agent::commandAck payload', { error: ackResult.error });
+          metrics.increment('ws_messages_invalid');
+          return;
+        }
+        const payload = parsed.payload as {
+          agentId?: string; taskId?: string; accepted?: boolean; reason?: string;
+        };
+        const agentId = payload.agentId ?? parsed.senderId;
+        if (!agentId) {
+          logger.warn('Dropping command ack with no agentId');
+          return;
+        }
+        const { shouldReplan } = agents.handleCommandAck(agentId, payload);
+        if (shouldReplan) {
+          // Rejected command — let the coordinator re-evaluate (design [A] step 5).
+          llm.invoke({ type: 'taskRejected', agentId, reason: payload.reason, taskId: payload.taskId });
         }
       }
 
       // --- Agent Events (routed via BSM) ---
-      else if (parsed.type.startsWith('agent::event::')) {
-        const event = parsed.payload;
+      else if (parsed.type.startsWith(MsgType.AgentEventPrefix)) {
+        const event: any = parsed.payload;
         const agentId = event?.agentId ?? parsed.senderId;
         if (!agentId) return;
 
@@ -91,8 +157,8 @@ wss.on('connection', (ws: WebSocket) => {
       }
 
       // --- Agent Status Updates ---
-      else if (parsed.type === 'agent::statusUpdate') {
-        const snapshot = parsed.payload;
+      else if (parsed.type === MsgType.AgentStatusUpdate) {
+        const snapshot: any = parsed.payload;
         const agentId = snapshot?.agentId ?? parsed.senderId;
         if (agentId) {
           agents.updateAgentStatus(agentId, snapshot);
@@ -101,12 +167,12 @@ wss.on('connection', (ws: WebSocket) => {
       }
 
       // --- Frontend ---
-      else if (parsed.type === 'frontend::register') {
+      else if (parsed.type === MsgType.FrontendRegister) {
         logger.info('Frontend client registered');
         connectedFrontendClients.add(ws);
       }
-      else if (parsed.type === 'frontend::startGoal') {
-        const { goal, count } = parsed.payload;
+      else if (parsed.type === MsgType.FrontendStartGoal) {
+        const { goal, count } = (parsed.payload ?? {}) as { goal?: string; count?: number };
         logger.info(`Goal from frontend: ${count ?? 1}x ${goal}`);
         llm.invoke({ type: 'startGoal', goal, count: count ?? 1 });
       }
