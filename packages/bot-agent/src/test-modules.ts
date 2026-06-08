@@ -12,6 +12,10 @@ import { GatheringModule } from './modules/gathering';
 import { ExplorationModule } from './modules/exploration';
 import { CraftingModule } from './modules/crafting';
 import { SmeltingModule } from './modules/smelting';
+import { CombatModule } from './modules/combat';
+import { BuildingModule } from './modules/building';
+import { StorageModule } from './modules/storage';
+import { TransferModule } from './modules/transfer';
 import { ModuleContext, ReportEventFn } from './types';
 import { BaseModule } from './modules/base';
 import { BehaviorLayer } from './behavior/layer';
@@ -39,7 +43,7 @@ const FUEL = process.env.FUEL || 'coal';     // smelt: fuel item
 
 const TEST_NAME = process.argv[2];
 
-if (!TEST_NAME || !['nav', 'gather', 'explore', 'craft', 'smelt', 'loop', 'smeltchain', 'help'].includes(TEST_NAME)) {
+if (!TEST_NAME || !['nav', 'gather', 'explore', 'craft', 'smelt', 'loop', 'smeltchain', 'build', 'storage', 'combat', 'transfer', 'help'].includes(TEST_NAME)) {
   console.log(`
 Module Test Runner
 ==================
@@ -372,6 +376,101 @@ async function testSmeltChain(
   return pass;
 }
 
+async function testBuilding(bot: Bot, build: BuildingModule): Promise<boolean> {
+  console.log('\n========== TEST: Building (place blocks) ==========');
+  const p = bot.entity.position.floored();
+  const targets = [
+    { x: p.x + 2, y: p.y, z: p.z },
+    { x: p.x + 3, y: p.y, z: p.z },
+    { x: p.x + 2, y: p.y, z: p.z + 1 },
+  ];
+  const blocks = targets.map((pos) => ({ pos, block: 'dirt' }));
+  await runModuleTest(bot, build, { blocks }, 60000);
+  let placed = 0;
+  for (const t of targets) { const b = bot.blockAt(new Vec3(t.x, t.y, t.z)); if (b && b.name === 'dirt') placed++; }
+  console.log(`  dirt blocks actually placed: ${placed}/${targets.length}`);
+  const pass = placed >= 2;
+  console.log(`  PASS (>=2 placed): ${pass ? 'YES' : 'NO'}`);
+  return pass;
+}
+
+async function testStorage(bot: Bot, storage: StorageModule): Promise<boolean> {
+  console.log('\n========== TEST: Storage (deposit + take) ==========');
+  const pos = {
+    x: parseInt(process.env.CHEST_X || '0', 10),
+    y: parseInt(process.env.CHEST_Y || '0', 10),
+    z: parseInt(process.env.CHEST_Z || '0', 10),
+  };
+  console.log(`  chest at (${pos.x}, ${pos.y}, ${pos.z})`);
+  const before = countItem(bot, 'dirt');
+  await runModuleTest(bot, storage, { action: 'deposit', position: pos, items: [{ item: 'dirt', count: 5 }] }, 60000);
+  const afterDeposit = countItem(bot, 'dirt');
+  console.log(`  dirt ${before} -> ${afterDeposit} after deposit (expect -5)`);
+  await runModuleTest(bot, storage, { action: 'take', position: pos, items: [{ item: 'dirt', count: 3 }] }, 60000);
+  const afterTake = countItem(bot, 'dirt');
+  console.log(`  dirt ${afterDeposit} -> ${afterTake} after take (expect +3)`);
+  const pass = (before - afterDeposit) >= 5 && (afterTake - afterDeposit) >= 3;
+  console.log(`  PASS (deposited 5 & took 3): ${pass ? 'YES' : 'NO'}`);
+  return pass;
+}
+
+async function testCombat(bot: Bot, combat: CombatModule): Promise<boolean> {
+  console.log('\n========== TEST: Combat (engage hostiles) ==========');
+  // Stop the behavior layer so ONLY the combat module fights (clean test).
+  behaviorLayer?.stop();
+  behaviorLayer = null;
+  const countHostiles = () => Object.values(bot.entities).filter(
+    (e: any) => e?.type === 'hostile' && e.position && bot.entity.position.distanceTo(e.position) < 24,
+  ).length;
+  // Wait for hostiles to appear (summoned externally during this window).
+  let before = countHostiles();
+  const waitDeadline = Date.now() + 22000;
+  while (before === 0 && Date.now() < waitDeadline) { await sleepMs(2000); before = countHostiles(); }
+  console.log(`  hostiles within 24 before: ${before}`);
+  if (before === 0) { console.log('  NOTE: no hostiles appeared — summon some first.'); return false; }
+
+  // Equip a sword if we have one (swordpvp uses the held weapon).
+  const sword = bot.inventory.items().find((i) => i.name.endsWith('_sword'));
+  if (sword) { try { await bot.equip(sword, 'hand'); console.log(`  equipped ${sword.name}`); } catch { /* ignore */ } }
+  const startHealth = bot.health;
+
+  (combat as any).activate({ mode: 'aggressive', engagementPolicy: 'engage', targetPriority: ['hostile'], retreatThreshold: 0.15, reportPlayers: false });
+  const deadline = Date.now() + 35000;
+  let minSeen = before;
+  while (Date.now() < deadline) {
+    await sleepMs(1500);
+    const c = countHostiles();
+    minSeen = Math.min(minSeen, c);
+    if (c === 0) break;
+  }
+  (combat as any).deactivate();
+  const after = countHostiles();
+  console.log(`  hostiles after: ${after} (min seen: ${minSeen})  health: ${startHealth} -> ${bot.health}`);
+  const pass = after < before;
+  console.log(`  PASS (killed >=1 hostile): ${pass ? 'YES' : 'NO'}`);
+  return pass;
+}
+
+async function testTransfer(bot: Bot, transfer: TransferModule): Promise<boolean> {
+  console.log('\n========== TEST: Transfer (give items to another agent) ==========');
+  const tp = {
+    x: parseInt(process.env.TARGET_X || '0', 10),
+    y: parseInt(process.env.TARGET_Y || '0', 10),
+    z: parseInt(process.env.TARGET_Z || '0', 10),
+  };
+  const before = countItem(bot, 'dirt');
+  await runModuleTest(bot, transfer, {
+    targetAgent: process.env.TARGET_AGENT || 'Receiver',
+    targetPosition: tp,
+    items: [{ item: 'dirt', count: 5 }],
+  }, 60000);
+  const after = countItem(bot, 'dirt');
+  console.log(`  sender dirt ${before} -> ${after} (expect -5 released)`);
+  const pass = (before - after) >= 5;
+  console.log(`  PASS (sender released 5; receiver pickup checked externally): ${pass ? 'YES' : 'NO'}`);
+  return pass;
+}
+
 // --- Main ---
 
 function sleepMs(ms: number): Promise<void> {
@@ -464,6 +563,13 @@ async function main(): Promise<void> {
   } catch (err) {
     logger.warn('combat (swordpvp) plugin not loaded — bot will use basic attacks');
   }
+  try {
+    const autoArmor = require('@nxg-org/mineflayer-auto-armor');
+    const p = typeof autoArmor === 'function' ? autoArmor : (autoArmor.default || autoArmor.plugin);
+    if (p) bot.loadPlugin(p);
+  } catch (err) {
+    logger.warn('auto-armor plugin not loaded');
+  }
 
   // Wait for chunks to load
   logger.info('Waiting 3s for chunks to load...');
@@ -487,6 +593,18 @@ async function main(): Promise<void> {
 
     const smeltModule = new SmeltingModule(ctx);
     smeltModule.initialize(navModule);
+
+    const combatModule = new CombatModule(ctx);
+    combatModule.initialize(navModule);
+
+    const buildModule = new BuildingModule(ctx);
+    buildModule.initialize(navModule);
+
+    const storageModule = new StorageModule(ctx);
+    storageModule.initialize(navModule);
+
+    const transferModule = new TransferModule(ctx);
+    transferModule.initialize(navModule);
 
     // Start the survival/combat behavior layer so the bot defends itself (mobs
     // otherwise kill the defenseless bot and it loses everything).
@@ -520,6 +638,18 @@ async function main(): Promise<void> {
           break;
         case 'smeltchain':
           pass = await testSmeltChain(bot, gatherModule, craftModule, smeltModule);
+          break;
+        case 'build':
+          pass = await testBuilding(bot, buildModule);
+          break;
+        case 'storage':
+          pass = await testStorage(bot, storageModule);
+          break;
+        case 'combat':
+          pass = await testCombat(bot, combatModule);
+          break;
+        case 'transfer':
+          pass = await testTransfer(bot, transferModule);
           break;
       }
     } catch (err: any) {
