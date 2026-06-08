@@ -67,7 +67,7 @@ services:
     environment:
       NODE_ENV: ${NODE_ENV:-production}
       LOG_LEVEL: ${LOG_LEVEL:-info}
-      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
       COORDINATOR_PORT: 5000
       COORDINATOR_WS_PORT: 5001
       WORLD_STATE_API_ADDRESS: http://world-state-service:3000

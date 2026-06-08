@@ -2,8 +2,8 @@
 
 This guide provides instructions for setting up, building, running, and troubleshooting the Aetherius project.
 
-**Architecture note:** Aetherius is built around a single conversational **Coordinator** (Gemini 3 Flash via
-`@google/genai`) that manages a MongoDB-persisted goal board and dispatches tasks directly to agents through
+**Architecture note:** Aetherius is built around a single conversational **Coordinator** (DeepSeek `deepseek-v4-flash` via the
+OpenAI-compatible `openai` SDK) that manages a MongoDB-persisted goal board and dispatches tasks directly to agents through
 the Bot Server Manager (BSM). The earlier Orchestrator + Squad Leader tiers have been removed; those packages
 are archived under `packages/_archived_*`. See [README.md](./README.md) for the full architecture.
 
@@ -13,7 +13,7 @@ are archived under `packages/_archived_*`. See [README.md](./README.md) for the 
 *   **pnpm:** Package manager used for the monorepo. Install via `npm install -g pnpm`.
 *   **MongoDB:** A running MongoDB instance (local or remote).
 *   **Minecraft Server:** A compatible Minecraft server (Java Edition, version 1.21.1) accessible by the agents. Ensure the server is configured appropriately (e.g., `online-mode=false` if agents use offline auth, sufficient view distance).
-*   **Google Gemini API Key:** Obtain an API key from Google AI Studio for the Coordinator's LLM interactions.
+*   **DeepSeek API Key:** Obtain an API key from the DeepSeek platform (https://platform.deepseek.com/api_keys) and set it as `DEEPSEEK_API_KEY` for the Coordinator's LLM interactions.
 
 ## 2. Setup
 
@@ -50,7 +50,7 @@ The services rely on environment variables for configuration. You can set these 
 
 **Required Variables:**
 
-*   **`GEMINI_API_KEY`:** (Needed by Coordinator) Your Google Gemini API key.
+*   **`DEEPSEEK_API_KEY`:** (Needed by Coordinator) Your DeepSeek API key (used by the coordinator's LLM planner; OpenAI-compatible, base URL `https://api.deepseek.com`).
 *   **`MONGO_URI`:** (Needed by World State Service) Your MongoDB connection string (e.g., `mongodb://localhost:27017/aetherius_world_state`).
 *   **`MC_HOST`:** (Needed by BSM/Agent) Hostname or IP of your Minecraft server.
 *   **`MC_PORT`:** (Needed by BSM/Agent) Port of your Minecraft server (e.g., `25565`).
@@ -89,7 +89,7 @@ The services rely on environment variables for configuration. You can set these 
 
 ```dotenv
 # Required
-GEMINI_API_KEY=YOUR_GEMINI_API_KEY
+DEEPSEEK_API_KEY=your_deepseek_api_key_here
 MONGO_URI=mongodb://localhost:27017/aetherius_world_state
 MC_HOST=localhost
 MC_PORT=25565
@@ -122,7 +122,7 @@ Start the services in separate terminals **in the following order**:
     *Watch for:* "BSM WebSocket server listening..." and "BSM TCP server listening..."
 4.  **Coordinator:**
     ```bash
-    # Set required env vars first (e.g., export GEMINI_API_KEY=...)
+    # Set required env vars first (e.g., export DEEPSEEK_API_KEY=...)
     pnpm --filter @aetherius/coordinator start
     ```
     *Watch for:* "Coordinator WebSocket server started" and "Coordinator HTTP server listening..."
@@ -142,7 +142,7 @@ manual `frontend::startGoal` trigger.
 
 The Coordinator then:
 1.  Receives the goal and adds it to the MongoDB-persisted goal board.
-2.  Runs its conversational planning loop (Gemini 3 Flash). Crafting sub-goals are expanded deterministically
+2.  Runs its conversational planning loop (DeepSeek `deepseek-v4-flash`). Crafting sub-goals are expanded deterministically
     into task-trees without spending LLM tokens.
 3.  Dispatches a task to a chosen agent as `coordinator::agentCommand` (marking the agent `pending`).
 4.  The BSM forwards the command to the agent over TCP; the agent immediately acks it.
@@ -170,8 +170,8 @@ The Coordinator then:
 *   **MongoDB Errors (World State Service):**
     *   Ensure the MongoDB server is running.
     *   Verify the `MONGO_URI` is correct (including database name, credentials if needed).
-*   **Gemini API Key Errors:**
-    *   Ensure `GEMINI_API_KEY` is set correctly in the Coordinator's environment.
+*   **DeepSeek API Key Errors:**
+    *   Ensure `DEEPSEEK_API_KEY` is set correctly in the Coordinator's environment.
     *   Check for typos or invalid characters in the key.
 *   **Minecraft Connection Errors (Agent Logs):**
     *   Verify `MC_HOST`, `MC_PORT`, `MC_VERSION` match the target server.

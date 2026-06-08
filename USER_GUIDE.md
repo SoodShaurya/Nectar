@@ -3,7 +3,7 @@
 **Autonomous Minecraft Agent Swarm System**
 
 A system for managing autonomous Minecraft bot agents driven by a single conversational Coordinator
-(Google Gemini 3 Flash) that plans, maintains a persistent goal board, and dispatches tasks to agents.
+(DeepSeek deepseek-v4-flash) that plans, maintains a persistent goal board, and dispatches tasks to agents.
 
 ---
 
@@ -31,7 +31,7 @@ removed (those packages are archived under `packages/_archived_*`).
 ```
                 ┌───────────────────────────────────────────┐
                 │              Coordinator                   │
-                │  Conversational AI (Gemini 3 Flash)        │
+                │  Conversational AI (DeepSeek v4-pro)       │
                 │  - Goal board (MongoDB-persisted)          │
                 │  - Deterministic crafting task-trees       │
                 │  - Direct task dispatch to agents          │
@@ -62,7 +62,7 @@ then `busy`. An optional `CLUSTER_AUTH_TOKEN` shared secret can be required for 
 
 | Service | Role | AI Model | Port |
 |---------|------|----------|------|
-| **Coordinator** | Conversational planning, goal board, task dispatch | Gemini 3 Flash | HTTP: 5000, WS: 5001 |
+| **Coordinator** | Conversational planning, goal board, task dispatch | DeepSeek deepseek-v4-flash | HTTP: 5000, WS: 5001 |
 | **Bot Server Manager** | Agent lifecycle & message routing | None | HTTP: 4002, WS: 4000, TCP: 4001 |
 | **Bot Agent** | Minecraft interaction & task execution | None | Connects to BSM TCP (4001) |
 | **World State** | Persistent world knowledge & goal board | None | HTTP: 3000, WS: 3001 |
@@ -82,9 +82,10 @@ then `busy`. An optional `CLUSTER_AUTH_TOKEN` shared secret can be required for 
 
 ### Required Accounts
 
-1. **Google Gemini API access**
-   - Get API key from: https://aistudio.google.com/app/apikey
-   - The Coordinator uses the Gemini 3 Flash model (`@google/genai`)
+1. **DeepSeek API access**
+   - Get API key from: https://platform.deepseek.com/api_keys
+   - The Coordinator uses the DeepSeek deepseek-v4-flash model via the OpenAI-compatible `openai` SDK pointed at https://api.deepseek.com
+   - Set this key as `DEEPSEEK_API_KEY`
 
 2. **Minecraft Server** (self-hosted or third-party)
    - Java Edition 1.21.1
@@ -148,8 +149,10 @@ mongod --dbpath /path/to/data
 Create a `.env` file in the project root:
 
 ```bash
-# --- Google Gemini AI (Coordinator) ---
-GEMINI_API_KEY=your-gemini-api-key-here
+# --- DeepSeek AI (Coordinator) ---
+DEEPSEEK_API_KEY=your-deepseek-api-key-here
+# Optional: override the coordinator model (default: deepseek-v4-flash; only deepseek-v4-* values are accepted)
+# COORDINATOR_MODEL=deepseek-v4-pro
 
 # --- MongoDB (World State Service) ---
 MONGO_URI=mongodb://admin:password@localhost:27017/aetherius?authSource=admin
@@ -201,7 +204,8 @@ Each service validates its configuration using Zod schemas. Missing required var
 - `WS_PORT` - WebSocket port (default: 3001)
 
 **Coordinator:**
-- `GEMINI_API_KEY` - Google Gemini API key (required)
+- `DEEPSEEK_API_KEY` - DeepSeek API key (required)
+- `COORDINATOR_MODEL` - Coordinator LLM model (default: deepseek-v4-flash; restricted to deepseek-v4-* variants, e.g. deepseek-v4-pro)
 - `COORDINATOR_PORT` - HTTP port (default: 5000)
 - `COORDINATOR_WS_PORT` - WebSocket port BSMs connect to (default: 5001)
 - `WORLD_STATE_API_ADDRESS` - World State HTTP endpoint (default: http://localhost:3000)
@@ -351,7 +355,7 @@ curl http://localhost:4002/health
   "timestamp": "2026-06-08T10:30:00.000Z",
   "dependencies": {
     "world-state-service": { "status": "connected" },
-    "gemini-api": { "status": "connected" }
+    "deepseek-api": { "status": "connected" }
   }
 }
 ```
@@ -362,7 +366,7 @@ curl http://localhost:4002/health
   "service": "coordinator",
   "status": "degraded",
   "dependencies": {
-    "gemini-api": {
+    "deepseek-api": {
       "status": "degraded",
       "error": "API unavailable"
     }
@@ -532,7 +536,7 @@ Use Grafana + Prometheus for visualization:
 **Purpose:** Conversational AI planner, goal-board owner, and task dispatcher
 
 **Key Features:**
-- Gemini 3 Flash (`@google/genai`) for conversational planning
+- DeepSeek deepseek-v4-flash (OpenAI-compatible `openai` SDK) for conversational planning
 - MongoDB-persisted goal board (via the World State Service)
 - Deterministic crafting task-tree resolution (no LLM tokens spent on recipes)
 - Direct task dispatch to agents through BSMs, with command acknowledgments
@@ -655,18 +659,18 @@ ERROR: MongoDB connection failed
 3. Test connection: `mongosh "mongodb://admin:password@localhost:27017"`
 4. Check firewall rules allow port 27017
 
-### Gemini API Errors
+### DeepSeek API Errors
 
 **Symptom:**
 ```
 ERROR: Error during Coordinator LLM interaction
-WARN: Gemini API request failed
+WARN: DeepSeek API request failed
 ```
 
 **Solutions:**
-1. Verify API key is valid: https://aistudio.google.com/app/apikey
-2. Check your account's quota / rate limits for the Gemini 3 Flash model
-3. Check Gemini API status: https://status.cloud.google.com/
+1. Verify `DEEPSEEK_API_KEY` is valid: https://platform.deepseek.com/api_keys
+2. Check your account's quota / rate limits for the deepseek-v4-flash model
+3. Check DeepSeek API status: https://status.deepseek.com/
 4. Inspect Coordinator logs for the specific error and retry behavior
 
 ### Agent Not Spawning
@@ -800,7 +804,7 @@ Nectar/
 - [ ] All services build successfully
 - [ ] Environment variables configured
 - [ ] MongoDB connection tested
-- [ ] Gemini API key validated
+- [ ] DeepSeek API key validated
 - [ ] Health checks return healthy
 - [ ] Metrics endpoints responding
 - [ ] Logs configured and rotating
@@ -877,7 +881,7 @@ watch -n 5 'curl -s http://localhost:5000/metrics | jq .'
 
 **Cost Optimization:**
 - The Coordinator resolves crafting goals deterministically (no LLM tokens spent on recipe expansion)
-- Gemini 3 Flash is a low-cost model well suited to the conversational planning loop
+- DeepSeek deepseek-v4-flash is the model used for the conversational planning loop
 - Monitor LLM invocation counts and durations in metrics
 
 ### Backup & Recovery

@@ -2,7 +2,7 @@
 
 > ⚠️ **HISTORICAL / PRE-OVERHAUL DOCUMENT.** This plan describes the original three-tier architecture
 > (Orchestrator with Gemini 1.5 Pro → dynamically-spawned Squad Leaders with Gemini 1.5 Flash → Bot Agents).
-> The project has since been overhauled to a single conversational **Coordinator** (Gemini 3 Flash) that
+> The project has since been overhauled to a single conversational **Coordinator** (DeepSeek deepseek-v4-flash) that
 > manages a MongoDB-persisted goal board and dispatches tasks directly to agents via the Bot Server Manager.
 > Squad Leaders no longer exist, and the Orchestrator Service is archived under `packages/_archived_*`.
 > The phase plan, diagrams, and `squadLeader::*` message flows below are retained for historical context only.
@@ -13,8 +13,9 @@
 
 ### Current architecture (summary)
 
-- **Coordinator** (Gemini 3 Flash, `@google/genai`): conversational planning; owns a MongoDB-persisted goal
-  board; deterministically resolves crafting goals into task-trees; dispatches tasks directly to agents.
+- **Coordinator** (DeepSeek `deepseek-v4-flash`, OpenAI-compatible `openai` SDK pointed at api.deepseek.com):
+  conversational planning; owns a MongoDB-persisted goal board; deterministically resolves crafting goals into
+  task-trees; dispatches tasks directly to agents.
 - **Bot Server Manager (BSM)**: spawns and supervises `bot-agent` processes; routes messages (Coordinator WS
   ⇄ agent TCP) with bounded outbound queues and command acknowledgments.
 - **Bot Agent**: Mineflayer bot with a 50ms reactive behavior layer plus skill modules.

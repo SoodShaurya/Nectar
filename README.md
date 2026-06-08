@@ -1,6 +1,6 @@
 # AETHERIUS 🌌
 
-**Autonomous Minecraft Agent Swarm powered by Google Gemini AI**
+**Autonomous Minecraft Agent Swarm powered by DeepSeek AI**
 
 An ambitious multi-agent system designed to autonomously complete complex objectives in Minecraft, starting with the ultimate goal: **Beat the Ender Dragon**.
 
@@ -9,7 +9,7 @@ An ambitious multi-agent system designed to autonomously complete complex object
 ## 🎯 Overview
 
 Aetherius is a distributed system built around a single conversational **Coordinator** that uses:
-- **Conversational AI Planning** (Gemini 3 Flash via `@google/genai`) that manages a goal board and dispatches tasks
+- **Conversational AI Planning** (DeepSeek `deepseek-v4-flash` via the OpenAI-compatible SDK) that manages a goal board and dispatches tasks
 - **Deterministic Crafting Resolution** that expands crafting goals into task-trees without spending LLM tokens
 - **Autonomous Agents** (Mineflayer) with a 50ms reactive behavior layer plus skill modules for in-game actions
 - **Shared World Knowledge** (MongoDB) for the goal board, POIs, resources, and infrastructure
@@ -29,7 +29,7 @@ spawns and supervises Minecraft bot-agent processes.
        │ frontend::startGoal (WS)
        ▼
 ┌──────────────────────────────────────────────┐
-│   Coordinator                                 │ ◄─── Gemini 3 Flash (@google/genai)
+│   Coordinator                                 │ ◄─── DeepSeek deepseek-v4-flash (OpenAI-compatible API)
 │   - Conversational planning                   │
 │   - MongoDB-persisted goal board              │
 │   - Deterministic crafting task-trees         │
@@ -60,7 +60,7 @@ then `busy`. An optional shared secret (`CLUSTER_AUTH_TOKEN`) can be required fo
 ## 📦 Packages
 
 Active packages:
-- **`coordinator`** - Conversational planner; goal board, crafting task-trees, task dispatch (Gemini 3 Flash)
+- **`coordinator`** - Conversational planner; goal board, crafting task-trees, task dispatch (DeepSeek deepseek-v4-flash)
 - **`bot-agent`** - Mineflayer bot with a 50ms reactive behavior layer and skill modules
 - **`bot-server-manager`** - Spawns/supervises bot-agents; routes messages (WS ⇄ TCP)
 - **`world-state-service`** - Persistent world knowledge and goal board (MongoDB + API)
@@ -79,7 +79,7 @@ Archived (no longer built; under `packages/_archived_*`):
 - **pnpm** ≥ 8.x (`npm install -g pnpm`)
 - **MongoDB** (local or cloud)
 - **Minecraft Server** (Java Edition, version 1.21.1)
-- **Google Gemini API Key** ([Get one here](https://aistudio.google.com/app/apikey))
+- **DeepSeek API Key** ([Get one here](https://platform.deepseek.com/api_keys))
 
 ### Installation
 
@@ -106,7 +106,7 @@ nano .env
 ```
 
 **Required environment variables:**
-- `GEMINI_API_KEY` - Your Google Gemini API key (Coordinator)
+- `DEEPSEEK_API_KEY` - Your DeepSeek API key (Coordinator)
 - `MONGO_URI` - MongoDB connection string (World State Service)
 - `MC_HOST`, `MC_PORT`, `MC_VERSION` - Minecraft server details (BSM / bot-agent)
 
@@ -158,7 +158,7 @@ pnpm run lint
 ## 📊 Current Status
 
 ### ✅ Completed
-- ✅ Architecture overhaul: single conversational Coordinator (Gemini 3 Flash)
+- ✅ Architecture overhaul: single conversational Coordinator (DeepSeek deepseek-v4-flash)
 - ✅ TypeScript monorepo structure
 - ✅ Frozen, versioned, schema-validated message protocol (shared-types)
 - ✅ Command acknowledgment flow (pending → busy via agent ack)
@@ -256,8 +256,8 @@ telnet localhost 25565
 - If `CLUSTER_AUTH_TOKEN` is set, ensure it matches between Coordinator, BSM, and agents
 
 ### LLM Errors
-- Verify GEMINI_API_KEY is valid
-- Check Gemini API rate limits / quota for your account
+- Verify DEEPSEEK_API_KEY is valid
+- Check DeepSeek API rate limits / quota for your account
 - Monitor the Coordinator logs for retries and errors
 
 ## 📚 Documentation
@@ -284,7 +284,7 @@ MIT License - see [LICENSE](./LICENSE) for details
 
 - [Mineflayer](https://github.com/PrismarineJS/mineflayer) - Minecraft bot framework
 - [PrismarineJS](https://github.com/PrismarineJS) - Minecraft protocol libraries
-- [Google Gemini](https://deepmind.google/technologies/gemini/) - AI planning
+- [DeepSeek](https://www.deepseek.com/) - AI planning
 - Original pathfinding implementation by GenerelSchwerz
 - Combat system by nxg-org
 

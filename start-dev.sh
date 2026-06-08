@@ -77,13 +77,13 @@ check_requirements() {
     fi
     print_success ".env file found"
 
-    # Check GEMINI_API_KEY
+    # Check DEEPSEEK_API_KEY
     source .env
-    if [ -z "$GEMINI_API_KEY" ] || [ "$GEMINI_API_KEY" = "your_gemini_api_key_here" ]; then
-        print_error "GEMINI_API_KEY not set in .env"
+    if [ -z "$DEEPSEEK_API_KEY" ] || [ "$DEEPSEEK_API_KEY" = "your_deepseek_api_key_here" ]; then
+        print_error "DEEPSEEK_API_KEY not set in .env"
         exit 1
     fi
-    print_success "GEMINI_API_KEY is configured"
+    print_success "DEEPSEEK_API_KEY is configured"
 
     echo ""
 }

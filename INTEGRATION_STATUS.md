@@ -2,7 +2,7 @@
 
 > ⚠️ **HISTORICAL / PRE-OVERHAUL DOCUMENT.** This file describes the original three-tier system
 > (Orchestrator + Squad Leaders + Agents). That architecture has since been replaced by a single
-> conversational **Coordinator** (Gemini 3 Flash). The Orchestrator Service and Squad Leader packages
+> conversational **Coordinator** (DeepSeek deepseek-v4-flash). The Orchestrator Service and Squad Leader packages
 > are **archived** under `packages/_archived_*` and are no longer built or run. References below to
 > `orchestratorConfigSchema` / `squadLeaderConfigSchema`, `squadLeader::*` messages, Gemini 1.5 Pro/Flash,
 > and the per-service tables are kept only as a record of the old integration work.
@@ -15,7 +15,7 @@
 
 | Service | Role | AI Model | Status |
 |---------|------|----------|--------|
-| **Coordinator** | Conversational planning, goal board, crafting task-trees, task dispatch | Gemini 3 Flash | Active |
+| **Coordinator** | Conversational planning, goal board, crafting task-trees, task dispatch | DeepSeek (deepseek-v4-flash) | Active |
 | **Bot Server Manager (BSM)** | Spawns/supervises bot-agents; routes WS ⇄ TCP | None | Active |
 | **Bot Agent** | Mineflayer bot; 50ms reactive layer + skill modules | None | Active |
 | **World State Service** | Goal board, POIs, resources, infrastructure (MongoDB) | None | Active |
