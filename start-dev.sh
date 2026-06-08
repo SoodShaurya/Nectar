@@ -158,9 +158,9 @@ if [ "$TERMINAL" = "tmux" ]; then
     print_success "Bot Server Manager started in tmux window 'bsm'"
     sleep 2
 
-    tmux new-window -n "orchestrator"
-    tmux send-keys "pnpm --filter @aetherius/orchestrator-service start" C-m
-    print_success "Orchestrator started in tmux window 'orchestrator'"
+    tmux new-window -n "coordinator"
+    tmux send-keys "pnpm --filter @aetherius/coordinator start" C-m
+    print_success "Coordinator started in tmux window 'coordinator'"
     sleep 2
 
     echo ""
@@ -180,8 +180,8 @@ elif [ "$TERMINAL" = "screen" ]; then
     print_success "Bot Server Manager started in screen session 'aetherius-bsm'"
     sleep 2
 
-    screen -dmS aetherius-orchestrator bash -c "pnpm --filter @aetherius/orchestrator-service start"
-    print_success "Orchestrator started in screen session 'aetherius-orchestrator'"
+    screen -dmS aetherius-coordinator bash -c "pnpm --filter @aetherius/coordinator start"
+    print_success "Coordinator started in screen session 'aetherius-coordinator'"
     sleep 2
 
     echo ""
@@ -200,8 +200,8 @@ else
     print_success "Bot Server Manager started (PID: $!)"
     sleep 2
 
-    pnpm --filter @aetherius/orchestrator-service start > logs/orchestrator.log 2>&1 &
-    print_success "Orchestrator started (PID: $!)"
+    pnpm --filter @aetherius/coordinator start > logs/coordinator.log 2>&1 &
+    print_success "Coordinator started (PID: $!)"
     sleep 2
 
     echo ""
