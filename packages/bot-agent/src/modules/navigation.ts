@@ -1,9 +1,10 @@
 import { BaseModule } from './base';
 import { ModuleContext } from '../types';
 import { Coordinates, createLogger } from '@aetherius/shared-types';
-import { loader as baritoneLoader, goals as bGoals } from '@miner-org/mineflayer-baritone';
+import { pathfinder, Movements, goals } from 'mineflayer-pathfinder';
 import { Vec3 } from 'vec3';
 
+const { GoalNear, GoalXZ } = goals;
 const logger = createLogger('bot-agent:navigation');
 
 export interface NavigationParams {
@@ -14,6 +15,7 @@ export interface NavigationParams {
 export class NavigationModule extends BaseModule {
   readonly name = 'navigation';
   private mcData: any = null;
+  private movements: Movements | null = null;
 
   constructor(ctx: ModuleContext) {
     super(ctx);
@@ -22,25 +24,20 @@ export class NavigationModule extends BaseModule {
   initialize(): void {
     this.mcData = require('minecraft-data')(this.bot.version);
 
-    // Use mineflayer-baritone (bot.ashfinder) — a stronger pathfinder with its
-    // own physics that can break/place blocks to dig through and pillar up to
-    // elevated targets, swim, parkour, and self-recover (replan) when stuck.
-    if (!(this.bot as any).ashfinder) {
-      this.bot.loadPlugin(baritoneLoader);
+    // Canonical mineflayer-pathfinder usage — proven stable on this server by a
+    // bare vanilla test. Library DEFAULT movements (canDig, allowParkour,
+    // allowSprinting, allow1by1towers all true); the library self-recovers when
+    // stuck and self-terminates on NoPath/Timeout.
+    if (!(this.bot as any).pathfinder) {
+      this.bot.loadPlugin(pathfinder);
     }
-    const cfg = (this.bot as any).ashfinder?.config;
-    if (cfg) {
-      cfg.breakBlocks = true;  // dig through obstacles to reach the goal
-      cfg.placeBlocks = true;  // pillar/scaffold up to elevated targets (needs blocks in inventory)
-      cfg.parkour = true;
-      if ('swimming' in cfg) cfg.swimming = true;
-      cfg.thinkTimeout = 5000; // fail fast on hard paths instead of grinding
-    }
+    this.movements = new Movements(this.bot);
+    (this.bot as any).pathfinder.setMovements(this.movements);
   }
 
   protected async run(params: NavigationParams, signal: AbortSignal): Promise<void> {
     const { destination, tolerance } = params;
-    if (!(this.bot as any).ashfinder) {
+    if (!(this.bot as any).pathfinder) {
       return this.fail('Pathfinder plugin not available');
     }
 
@@ -59,13 +56,14 @@ export class NavigationModule extends BaseModule {
   /**
    * Public navigateTo for use by other modules. Use ignoreY for exploration-style goals.
    *
-   * Backed by mineflayer-baritone (bot.ashfinder). We race the goto() against a
-   * generous wall-clock backstop and the abort signal, cancelling via
-   * ashfinder.stop(). Resolves false instead of throwing.
+   * Canonical mineflayer-pathfinder: await goto() and trust the library to
+   * self-recover from being stuck and self-terminate on NoPath/Timeout. A
+   * generous wall-clock backstop (cancelled via setGoal(null)) guards the rare
+   * hang. Resolves false instead of throwing.
    */
   async navigateTo(coords: Coordinates, signal?: AbortSignal, tolerance: number = 2, ignoreY: boolean = false, timeoutMs: number = 60000): Promise<boolean> {
-    const af = (this.bot as any).ashfinder;
-    if (!af) return false;
+    const pf = (this.bot as any).pathfinder;
+    if (!pf) return false;
 
     const pos = this.bot.entity.position;
     if (isNaN(pos.x) || isNaN(pos.y) || isNaN(pos.z)) {
@@ -73,19 +71,19 @@ export class NavigationModule extends BaseModule {
       return false;
     }
 
-    const v = new Vec3(Math.floor(coords.x), Math.floor(coords.y), Math.floor(coords.z));
-    const goal = ignoreY ? new bGoals.GoalXZ(v) : new bGoals.GoalNear(v, tolerance);
+    const goal = ignoreY
+      ? new GoalXZ(coords.x, coords.z)
+      : new GoalNear(coords.x, coords.y, coords.z, tolerance);
 
-    // baritone throws if a goto is already running — make sure we're idle first.
-    if (!af.stopped) { try { af.stop(); } catch { /* ignore */ } }
-
-    const cancel = () => { try { af.stop(); } catch { /* ignore */ } };
+    const cancel = () => { try { pf.setGoal(null); } catch { /* ignore */ } };
     let backstop: NodeJS.Timeout | null = null;
     let abortHandler: (() => void) | null = null;
 
     try {
-      const gotoP = Promise.resolve(af.goto(goal)).then(() => true).catch((err: any) => {
-        logger.warn(`ashfinder error: ${err?.message ?? err}`);
+      const gotoP = pf.goto(goal).then(() => true).catch((err: any) => {
+        if (!['GoalChanged', 'PathStopped', 'NoPath', 'Timeout'].includes(err?.name)) {
+          logger.warn(`Pathfinder error: [${err?.name}] ${err?.message ?? err}`);
+        }
         return false;
       });
 
@@ -218,7 +216,7 @@ export class NavigationModule extends BaseModule {
 
   protected cleanup(): void {
     try {
-      (this.bot as any).ashfinder?.stop?.();
+      (this.bot as any).pathfinder?.setGoal?.(null);
     } catch {
       // ignore
     }

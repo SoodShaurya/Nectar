@@ -15,7 +15,7 @@ export interface GatheringParams {
 }
 
 // How long to chase/collect drops after a block break or mob kill.
-// Generous because baritone pathing to a fallen item can take many seconds.
+// Generous because pathing to a fallen item can take a few seconds.
 const COLLECT_TIMEOUT_MS = 15000;
 const DROP_SEARCH_RADIUS = 12;
 const KILL_TIMEOUT_MS = 15000;

@@ -25,6 +25,30 @@ export class SmeltingModule extends BaseModule {
     this.navigationModule = navModule;
   }
 
+  /** Place a held item on a CLEAR floor spot adjacent to the bot (robust against
+   *  occupied spots — the naive "place at +x" fails if that block is taken). */
+  private async placeBlockNearby(item: any, signal: AbortSignal): Promise<any> {
+    try { await this.bot.equip(item, 'hand'); } catch { return null; }
+    const { Vec3 } = require('vec3');
+    const base = this.bot.entity.position.floored();
+    const dirs = [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [1, 0, 1], [1, 0, -1], [-1, 0, 1], [-1, 0, -1]];
+    for (const [dx, dy, dz] of dirs) {
+      if (this.isAborted(signal)) return null;
+      const spot = base.offset(dx, dy, dz);                // feet-level spot beside the bot
+      const floor = this.bot.blockAt(spot.offset(0, -1, 0)); // block to place ON
+      const target = this.bot.blockAt(spot);
+      if (!floor || !target) continue;
+      if (target.name !== 'air' && target.name !== 'cave_air') continue; // spot occupied
+      if ((floor as any).boundingBox !== 'block') continue;              // need a solid floor
+      try {
+        await this.bot.placeBlock(floor, new Vec3(0, 1, 0)); // place on top of floor -> at spot
+        const placed = this.bot.blockAt(spot);
+        if (placed && placed.name === item.name) return placed;
+      } catch { /* try the next spot */ }
+    }
+    return null;
+  }
+
   /** Items smelted per unit of a given fuel. */
   private burnPerFuel(fuel: string): number {
     const table: Record<string, number> = {
@@ -73,15 +97,8 @@ export class SmeltingModule extends BaseModule {
         this.mcData.itemsByName['furnace']?.id, null, false,
       );
       if (!furnaceItem) return this.fail('No furnace found nearby and none in inventory');
-      const refBlock = this.bot.blockAt(this.bot.entity.position.offset(0, -1, 0));
-      if (refBlock) {
-        try {
-          await this.bot.equip(furnaceItem, 'hand');
-          await this.bot.placeBlock(refBlock, { x: 1, y: 0, z: 0 } as any);
-        } catch (err) {
-          return this.fail(`Failed to place furnace: ${err}`);
-        }
-      }
+      const placed = await this.placeBlockNearby(furnaceItem, signal);
+      if (!placed) return this.fail('Failed to place furnace (no clear adjacent spot)');
       furnace = this.bot.findBlock({ matching: furnaceIds, maxDistance: 8 });
     }
     if (!furnace) return this.fail('Could not locate furnace');

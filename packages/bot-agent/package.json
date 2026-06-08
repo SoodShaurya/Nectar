@@ -21,7 +21,6 @@
   "license": "MIT",
   "dependencies": {
     "@aetherius/shared-types": "workspace:*",
-    "@miner-org/mineflayer-baritone": "^4.5.1",
     "@nxg-org/mineflayer-auto-armor": "^1.2.2",
     "@nxg-org/mineflayer-auto-eat": "^2.4.1",
     "@nxg-org/mineflayer-custom-pvp": "^1.7.6",

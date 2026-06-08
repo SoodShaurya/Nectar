@@ -67,9 +67,6 @@ importers:
       '@aetherius/shared-types':
         specifier: workspace:*
         version: link:../shared-types
-      '@miner-org/mineflayer-baritone':
-        specifier: ^4.5.1
-        version: 4.5.1
       '@nxg-org/mineflayer-auto-armor':
         specifier: ^1.2.2
         version: 1.2.2
@@ -274,12 +271,6 @@ packages:
   '@jridgewell/sourcemap-codec@1.5.5':
     resolution: {integrity: sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og==}
 
-  '@miner-org/mineflayer-baritone@4.5.1':
-    resolution: {integrity: sha512-sQsfGQC7h6l4z/135Bb7g4LiXdcVUlXDMuZTn0Nds+Zr0TvARalBNHEDXsz/IxYofT3Re+rB+AgfdCrDDcDMtQ==}
-
-  '@miner-org/mineflayer-physics-reworked@0.0.4':
-    resolution: {integrity: sha512-yYsiog8tf97Wlvqd8rwBSxXHufjGj2Auzjk14XlnbWnY/bewBQuoh1k3u+Vk52MAl+RikZEgDaKVCYzoNYyEfA==}
-
   '@mongodb-js/saslprep@1.2.2':
     resolution: {integrity: sha512-EB0O3SCSNRUFk66iRCpI+cXzIjdswfCs7F6nOC3RAGJ7xr5YhaicvsRwJ9eyzYvYRlCSDUO/c7g4yNulxKC1WA==}
 
@@ -297,9 +288,6 @@ packages:
 
   '@nxg-org/mineflayer-custom-pvp@1.7.9':
     resolution: {integrity: sha512-fA58AfHgNMqPOkETqPiTAtS596CugM83OQRJQcINWAM2pbhfvCA/tatETgy0VnYJtacEM9xNqUkgsKjLwIRf3Q==}
-
-  '@nxg-org/mineflayer-physics-util@1.9.3':
-    resolution: {integrity: sha512-oVab8U2RbBGJ66CxGuouPPs3oZBYmZS19e8fWo5r6PEOlwK+vvsa3IIyyQN+rdFhRqpQKpVN0r3KguM7+WSznw==}
 
   '@nxg-org/mineflayer-smooth-look@1.1.2':
     resolution: {integrity: sha512-qmYELGxFAyuyJA3wlmH6qWrDhror7iWECh4xX0qHt6tSR+MwbHjowoL/6RQZv60qU6djTXopJ8Lfq2WhSVQjEw==}
@@ -1389,9 +1377,6 @@ packages:
     resolution: {integrity: sha512-hOS089on8RduqdbhvQ5Z37A0ESjsqz6qnRcffsMU3495FuTdqSm+7bhJ29JvIOsBDEEnan5DPu9t3To9VRlMzA==}
     engines: {node: '>=8.10.0'}
 
-  require-dir@1.2.0:
-    resolution: {integrity: sha512-LY85DTSu+heYgDqq/mK+7zFHWkttVNRXC9NKcKGyuGLdlsfbjEPrIEYdCVrx6hqnJb+xSu3Lzaoo8VnmOhhjNA==}
-
   ret@0.1.15:
     resolution: {integrity: sha512-TTlYpa+OL+vMMNG24xSlQGEJ3B/RzEfUlLct7b5G/ytav+wPrplCpVMFuwzXbkecJrb6IYo1iFb0S9v37754mg==}
     engines: {node: '>=0.12'}
@@ -1784,26 +1769,6 @@ snapshots:
 
   '@jridgewell/sourcemap-codec@1.5.5': {}
 
-  '@miner-org/mineflayer-baritone@4.5.1':
-    dependencies:
-      '@miner-org/mineflayer-physics-reworked': 0.0.4
-      '@nxg-org/mineflayer-physics-util': 1.9.3
-      minecraft-data: 3.110.2
-      minecraft-protocol: 1.66.2
-      mineflayer: 4.37.1
-      protodef: 1.19.0
-      require-dir: 1.2.0
-    transitivePeerDependencies:
-      - encoding
-      - supports-color
-
-  '@miner-org/mineflayer-physics-reworked@0.0.4':
-    dependencies:
-      mineflayer: 4.37.1
-    transitivePeerDependencies:
-      - encoding
-      - supports-color
-
   '@mongodb-js/saslprep@1.2.2':
     dependencies:
       sparse-bitfield: 3.0.3
@@ -1835,10 +1800,6 @@ snapshots:
     transitivePeerDependencies:
       - encoding
       - supports-color
-
-  '@nxg-org/mineflayer-physics-util@1.9.3':
-    dependencies:
-      '@nxg-org/mineflayer-util-plugin': 1.8.4
 
   '@nxg-org/mineflayer-smooth-look@1.1.2':
     dependencies:
@@ -2994,8 +2955,6 @@ snapshots:
   readdirp@3.6.0:
     dependencies:
       picomatch: 2.3.1
-
-  require-dir@1.2.0: {}
 
   ret@0.1.15: {}
 

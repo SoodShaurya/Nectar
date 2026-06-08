@@ -14,6 +14,11 @@ import { CraftingModule } from './modules/crafting';
 import { SmeltingModule } from './modules/smelting';
 import { ModuleContext, ReportEventFn } from './types';
 import { BaseModule } from './modules/base';
+import { BehaviorLayer } from './behavior/layer';
+
+// Behavior layer (survival/combat) — wired into runModuleTest so the bot defends
+// itself during tasks, like production. Without it the bot dies to mobs.
+let behaviorLayer: BehaviorLayer | null = null;
 
 const logger = createLogger('test-modules');
 
@@ -81,6 +86,7 @@ function runModuleTest(
     const settle = (success: boolean, data: any) => {
       if (settled) return;
       settled = true;
+      behaviorLayer?.setActiveModule(null);
       clearInterval(poller);
       clearTimeout(timeout);
       const endPos = bot.entity.position.clone();
@@ -106,6 +112,7 @@ function runModuleTest(
     }, timeoutMs);
 
     logger.info(`[START] Activating module with params:`, params);
+    behaviorLayer?.setActiveModule(module);
     module.activate(params);
   });
 }
@@ -450,6 +457,13 @@ async function main(): Promise<void> {
   } catch (err) {
     logger.warn('auto-eat plugin not loaded');
   }
+  try {
+    const combat = require('@nxg-org/mineflayer-custom-pvp');
+    const p = typeof combat === 'function' ? combat : (combat.default || combat.plugin);
+    if (p) bot.loadPlugin(p);
+  } catch (err) {
+    logger.warn('combat (swordpvp) plugin not loaded — bot will use basic attacks');
+  }
 
   // Wait for chunks to load
   logger.info('Waiting 3s for chunks to load...');
@@ -473,6 +487,11 @@ async function main(): Promise<void> {
 
     const smeltModule = new SmeltingModule(ctx);
     smeltModule.initialize(navModule);
+
+    // Start the survival/combat behavior layer so the bot defends itself (mobs
+    // otherwise kill the defenseless bot and it loses everything).
+    behaviorLayer = new BehaviorLayer(bot, AGENT_ID);
+    behaviorLayer.start();
 
     // Recover from a hostile spawn (water -> swim to land; tree canopy -> mine down).
     await navModule.recoverToSafeGround();

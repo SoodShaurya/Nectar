@@ -37,6 +37,9 @@ export class BehaviorLayer extends EventEmitter {
 
   // State tracking for hysteresis and cooldowns
   private isRetreating = false;
+  private inCombat = false;
+  private combatTargetId: number | null = null;
+  private lastBasicAttack = 0;
   private lastHealthAlertTime = 0;
   private lastFoodAlertTime = 0;
   private lastPlayerAlertTime = 0;
@@ -138,40 +141,52 @@ export class BehaviorLayer extends EventEmitter {
 
   // --- Priority 3: Hostile Scan ---
   private checkHostiles(): void {
-    if (this.isRetreating) return; // Already in survival mode
+    if (this.isRetreating) return; // health-retreat takes precedence
 
-    const policy = this.profile.mobEngagementPolicy;
     const pos = this.bot.entity.position;
+    const pvp = (this.bot as any).swordpvp || (this.bot as any).pvp;
 
-    // Always avoid creepers
-    if (this.profile.creepAvoidanceRadius > 0) {
-      const creeper = this.bot.nearestEntity((e) =>
-        e.name === 'creeper' && e.position.distanceTo(pos) < this.profile.creepAvoidanceRadius
-      );
-      if (creeper) {
-        this.activeModule?.pause();
-        // Pathfind away handled by module system
-        return;
-      }
-    }
-
-    if (policy === 'avoid') return; // Don't engage
-
+    // Find the nearest threatening hostile (incl. creepers — defend against them too).
     const hostile = this.bot.nearestEntity((e) =>
-      e.type === 'hostile' && e.name !== 'creeper' &&
-      e.position.distanceTo(pos) < this.profile.hostileDetectionRadius
+      e.type === 'hostile' && e.position.distanceTo(pos) < this.profile.hostileDetectionRadius,
     );
 
-    if (!hostile) return;
-
-    if (policy === 'auto') {
-      const gearScore = this.getGearScore();
-      const threatScore = MOB_THREAT[hostile.name ?? ''] ?? 3;
-      if (gearScore <= threatScore) return; // Don't engage
+    // No hostile nearby: if we were fighting, stand down and resume the task.
+    if (!hostile) {
+      if (this.inCombat) {
+        this.inCombat = false;
+        this.combatTargetId = null;
+        try { pvp?.stop?.(); } catch { /* ignore */ }
+        this.activeModule?.resume();
+        logger.info('Hostiles cleared — resuming task');
+      }
+      return;
     }
 
-    // Engage — combat module handles actual fighting
-    // Just alert the coordinator that hostile engagement is happening
+    // A hostile is in range — DEFEND (the old code only alerted, so the bot just
+    // died). Pause the active task and engage. Engage on TARGET CHANGE only so we
+    // don't reset the pvp plugin every 50ms tick.
+    if (!this.inCombat) {
+      this.inCombat = true;
+      this.activeModule?.pause();
+      logger.info(`Engaging hostile: ${hostile.name} (gear=${this.getGearScore()})`);
+    }
+    try {
+      if (pvp?.attack) {
+        if (this.combatTargetId !== hostile.id) {
+          this.combatTargetId = hostile.id;
+          pvp.attack(hostile); // continuous combat until target dies / stop()
+        }
+      } else {
+        // No pvp plugin: basic attacks on the melee cooldown.
+        const now = Date.now();
+        if (now - this.lastBasicAttack > 600) {
+          this.lastBasicAttack = now;
+          try { this.bot.lookAt(hostile.position.offset(0, hostile.height * 0.9, 0), true); } catch { /* ignore */ }
+          this.bot.attack(hostile);
+        }
+      }
+    } catch { /* ignore transient combat errors */ }
   }
 
   // --- Priority 4: Player Scan ---
