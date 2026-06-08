@@ -13,6 +13,15 @@ const logger = createLogger('coordinator:agents');
 const COMMAND_ACK_TIMEOUT_MS = 10000;
 
 /**
+ * Default time a 'busy' (acked) task may run without emitting a
+ * taskComplete/taskFailed event before the stall watchdog flags it for the
+ * coordinator to re-evaluate. Generous so legitimately long tasks (large
+ * gathers, smelts) are not interrupted; the LLM decides whether to wait,
+ * cancel, or reassign. Overridable per call via getStalledAgents(thresholdMs).
+ */
+export const DEFAULT_STALL_AFTER_MS = 300000; // 5 minutes
+
+/**
  * Coordinator-internal agent status. Extends the frozen shared-types union
  * (`idle | busy | unknown`) with a transient `pending` state used while a
  * dispatched command is awaiting acknowledgment (design [A]).
@@ -24,6 +33,18 @@ export interface ExtendedAgentInfo extends Omit<AgentInfo, 'status'> {
   inventoryMap: Record<string, number>;
   currentTaskId?: string;
   lastStatusUpdate?: number;
+  /** When the current task transitioned to 'busy' (ack accepted). Basis for stall detection. */
+  taskStartedAt?: number;
+  /** True once the stall watchdog has surfaced this task, so it is flagged at most once. */
+  stallFlagged?: boolean;
+}
+
+/** A task that has run past the stall threshold without completing. */
+export interface StalledAgent {
+  agentId: string;
+  taskId?: string;
+  taskType?: string;
+  elapsedMs: number;
 }
 
 /**
@@ -88,6 +109,8 @@ export class AgentManager extends EventEmitter {
             agent.status = 'unknown';
             agent.currentTaskId = undefined;
             agent.currentTaskType = undefined;
+            agent.taskStartedAt = undefined;
+            agent.stallFlagged = false;
             logger.warn(`Agent ${agent.agentId} marked unknown (BSM ${id} disconnected)`);
           }
         }
@@ -136,6 +159,8 @@ export class AgentManager extends EventEmitter {
         agent.status = 'idle';
         agent.currentTaskId = undefined;
         agent.currentTaskType = undefined;
+        agent.taskStartedAt = undefined;
+        agent.stallFlagged = false;
         metrics.increment(`agent_${eventType}`);
       }
     }
@@ -212,6 +237,9 @@ export class AgentManager extends EventEmitter {
     if (payload.accepted) {
       agent.status = 'busy';
       agent.currentTaskId = payload.taskId ?? agent.currentTaskId;
+      // Task is now genuinely running — start the stall clock.
+      agent.taskStartedAt = Date.now();
+      agent.stallFlagged = false;
       logger.info(`Command accepted by ${agentId} (${agent.currentTaskId})`);
       metrics.increment('commands_accepted');
       return { shouldReplan: false };
@@ -221,6 +249,8 @@ export class AgentManager extends EventEmitter {
     agent.status = 'idle';
     agent.currentTaskId = undefined;
     agent.currentTaskType = undefined;
+    agent.taskStartedAt = undefined;
+    agent.stallFlagged = false;
     logger.warn(`Command rejected by ${agentId}`, { reason: payload.reason });
     metrics.increment('commands_rejected');
     return { shouldReplan: true };
@@ -250,6 +280,8 @@ export class AgentManager extends EventEmitter {
     agent.status = 'idle';
     agent.currentTaskId = undefined;
     agent.currentTaskType = undefined;
+    agent.taskStartedAt = undefined;
+    agent.stallFlagged = false;
 
     logger.info(`Task cancelled for ${agentId}`);
     metrics.increment('tasks_cancelled');
@@ -324,6 +356,38 @@ export class AgentManager extends EventEmitter {
 
   getBusyAgents(): ExtendedAgentInfo[] {
     return Array.from(this.knownAgents.values()).filter(a => a.status === 'busy');
+  }
+
+  /**
+   * Busy agents whose task has run longer than `thresholdMs` without completing
+   * and has not yet been flagged. Used by the deterministic supervisor tick to
+   * detect silent stalls (acked but never emits taskComplete/taskFailed) without
+   * spending an LLM call. Caller should markStallFlagged() after surfacing one.
+   */
+  getStalledAgents(now: number, thresholdMs: number = DEFAULT_STALL_AFTER_MS): StalledAgent[] {
+    const stalled: StalledAgent[] = [];
+    for (const agent of this.knownAgents.values()) {
+      if (
+        agent.status === 'busy' &&
+        agent.taskStartedAt !== undefined &&
+        !agent.stallFlagged &&
+        now - agent.taskStartedAt > thresholdMs
+      ) {
+        stalled.push({
+          agentId: agent.agentId,
+          taskId: agent.currentTaskId,
+          taskType: agent.currentTaskType as string | undefined,
+          elapsedMs: now - agent.taskStartedAt,
+        });
+      }
+    }
+    return stalled;
+  }
+
+  /** Mark an agent's current task as already surfaced to the coordinator (flag once per task). */
+  markStallFlagged(agentId: string): void {
+    const agent = this.knownAgents.get(agentId);
+    if (agent) agent.stallFlagged = true;
   }
 
   getAllAgents(): ExtendedAgentInfo[] {

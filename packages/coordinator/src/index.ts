@@ -25,6 +25,7 @@ import { AgentManager } from './agents';
 import { WorldStateClient } from './world-state';
 import { GoalBoard } from './goal-board';
 import { CoordinatorLLM } from './llm';
+import { supervisorTick } from './supervisor';
 
 const logger = createLogger('coordinator');
 const config = validateConfig(coordinatorConfigSchema, 'Coordinator');
@@ -197,17 +198,27 @@ wss.on('connection', (ws: WebSocket) => {
   });
 });
 
-// --- Periodic Timer (60s) ---
-const PERIODIC_INTERVAL_MS = 60000;
-const periodicTimer = setInterval(async () => {
-  // Only invoke if we have agents and active goals
-  if (agents.getAgentCount() > 0) {
-    const activeGoals = await goalBoard.getActiveGoals();
-    if (activeGoals.length > 0 || agents.getIdleAgents().length > 0) {
-      llm.invoke({ type: 'periodic' });
-    }
-  }
-}, PERIODIC_INTERVAL_MS);
+// --- Deterministic Supervisor Tick ---
+// The coordinator is primarily event-driven (player chat, task complete/fail,
+// ack timeout, BSM disconnect all push an invoke immediately). This tick is the
+// cheap, non-LLM backstop that catches drift no event reports. It only spends an
+// LLM call when a deterministic condition actually fires, so an idle-but-active
+// swarm costs ~nothing instead of a reasoning call every 60s.
+const SUPERVISOR_INTERVAL_MS = 15000; // cheap deterministic check; safe to run often
+// A 'busy' (acked) task running this long with no completion event is a stall.
+const STALL_AFTER_MS = 300000; // 5 min — generous; the LLM decides what to do
+// If the event stream has been silent this long despite open work, do one sweep.
+const QUIET_BACKSTOP_MS = 120000; // 2 min
+
+const supervisorTimer = setInterval(() => {
+  supervisorTick(
+    { agents, goalBoard, llm },
+    { stallAfterMs: STALL_AFTER_MS, quietBackstopMs: QUIET_BACKSTOP_MS },
+    Date.now(),
+  ).catch((error) => {
+    logger.error('Supervisor tick failed', { error: error instanceof Error ? error.message : String(error) });
+  });
+}, SUPERVISOR_INTERVAL_MS);
 
 // --- Health Checks ---
 const healthCheck = new HealthCheck('coordinator', '0.1.0');
@@ -276,7 +287,7 @@ logger.info('Coordinator started. Waiting for connections...');
 const shutdown = createGracefulShutdown(logger);
 
 shutdown.register(async () => {
-  clearInterval(periodicTimer);
+  clearInterval(supervisorTimer);
 });
 
 shutdown.register(async () => {

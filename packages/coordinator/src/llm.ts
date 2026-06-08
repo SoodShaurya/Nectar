@@ -42,6 +42,9 @@ export class CoordinatorLLM {
 
   private isRunning = false;
   private pendingEvents: any[] = [];
+  /** Timestamp of the most recent invocation (any event). Lets the supervisor
+   *  tick suppress the periodic backstop while the event stream is active. */
+  private lastInvokeAt = 0;
 
   constructor(
     apiKey: string,
@@ -72,8 +75,22 @@ export class CoordinatorLLM {
     return this.circuitBreaker.getState();
   }
 
+  /** Whether an invocation is currently in flight (so the supervisor doesn't pile on). */
+  isBusy(): boolean {
+    return this.isRunning;
+  }
+
+  /** Timestamp (ms) of the most recent invocation, or 0 if never invoked. */
+  getLastInvokeTime(): number {
+    return this.lastInvokeAt;
+  }
+
   /** Main entry point — invoke the coordinator on any event. */
   async invoke(triggeringEvent: any): Promise<void> {
+    // Mark activity for any invocation attempt (even one that queues) so the
+    // supervisor's quiet-backstop gate reflects real coordinator attention.
+    this.lastInvokeAt = Date.now();
+
     if (this.isRunning) {
       this.pendingEvents.push(triggeringEvent);
       logger.debug('Coordinator busy, event queued', { queueSize: this.pendingEvents.length });
@@ -266,7 +283,12 @@ export class CoordinatorLLM {
       parts.push(`**Player "${event.playerName}" said:** "${event.message}"`);
       parts.push(`\nRespond to this player using the messagePlayer tool. Then handle any request they made.`);
     } else if (event.type === 'periodic') {
-      parts.push(`Periodic check (60s timer). Review goal progress, check for idle agents, optimize allocations.`);
+      const reason = event.reason ? ` (${event.reason})` : '';
+      parts.push(`Periodic backstop check${reason}. The event stream has been quiet despite open work. Review goal progress, allocate any idle agents to ready work, and optimize. If there is genuinely nothing actionable, take no action.`);
+    } else if (event.type === 'stall') {
+      const secs = Math.round((event.elapsedMs ?? 0) / 1000);
+      parts.push(`**Stall watchdog:** Agent "${event.agentId}" has been running ${event.taskType ?? 'a task'} (${event.taskId ?? 'unknown'}) for ${secs}s with no completion event.`);
+      parts.push(`Decide: keep waiting (if this task type plausibly takes this long and is making progress), cancel and reassign, or adjust the plan. Do NOT reflexively cancel a legitimately long task.`);
     } else if (event.type === 'startGoal') {
       parts.push(`New goal request from frontend: "${event.goal}" (count: ${event.count ?? 1})`);
       parts.push(`Create a goal and start planning.`);
