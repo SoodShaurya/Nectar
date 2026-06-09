@@ -45,6 +45,9 @@ export class CoordinatorLLM {
 
   private isRunning = false;
   private pendingEvents: any[] = [];
+  /** Optional sink that mirrors coordinator chat replies to the web frontend.
+   *  Set post-construction via setChatNotifier(); undefined until then. */
+  private chatNotifier?: (message: string) => void;
   /** Timestamp of the most recent invocation (any event). Lets the supervisor
    *  tick suppress the periodic backstop while the event stream is active. */
   private lastInvokeAt = 0;
@@ -85,6 +88,14 @@ export class CoordinatorLLM {
 
   getCircuitBreakerState(): string {
     return this.circuitBreaker.getState();
+  }
+
+  /**
+   * Register the callback used to mirror coordinator chat replies (the
+   * messagePlayer tool) to the web frontend. Set once at startup by index.ts.
+   */
+  setChatNotifier(fn: (message: string) => void): void {
+    this.chatNotifier = fn;
   }
 
   /**
@@ -388,6 +399,7 @@ export class CoordinatorLLM {
       worldState: this.worldState,
       goalBoard: this.goalBoard,
       mcVersion: this.mcVersion,
+      notifyChat: this.chatNotifier,
     };
   }
 }

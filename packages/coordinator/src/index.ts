@@ -20,6 +20,8 @@ import {
   bsmRegisterPayloadSchema,
   commandAckPayloadSchema,
   checkAuthToken,
+  makeWsMessage,
+  type CoordinatorStatePayload,
 } from '@aetherius/shared-types';
 import { AgentManager } from './agents';
 import { WorldStateClient } from './world-state';
@@ -62,6 +64,78 @@ let authDisabledWarned = false;
 
 // --- Frontend Clients ---
 const connectedFrontendClients: Set<WebSocket> = new Set();
+
+// --- In-game chat whitelist ---
+// Gates ONLY in-game player chat. Web chat from the frontend ALWAYS bypasses it
+// (the web user is trusted/local). Seeded from COORDINATOR_CHAT_WHITELIST; if
+// that env lists any usernames the gate defaults to enabled. Editable at runtime
+// via frontend::updateWhitelist.
+const chatWhitelist: { enabled: boolean; players: Set<string> } = (() => {
+  const players = new Set(
+    (config.COORDINATOR_CHAT_WHITELIST ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+  return { enabled: players.size > 0, players };
+})();
+logger.info('Chat whitelist seeded', {
+  enabled: chatWhitelist.enabled,
+  players: [...chatWhitelist.players],
+});
+
+/** JSON-send a coordinator message to every OPEN registered frontend client. */
+function broadcastToFrontends(type: string, payload: unknown): void {
+  const frame = JSON.stringify(makeWsMessage(type, payload, 'coordinator'));
+  for (const client of connectedFrontendClients) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(frame);
+    }
+  }
+}
+
+/** Build the current CoordinatorStatePayload snapshot and push it to frontends. */
+async function broadcastState(): Promise<void> {
+  try {
+    const agentList: CoordinatorStatePayload['agents'] = agents.getAllAgents().map((a) => ({
+      agentId: a.agentId,
+      status: a.status,
+      currentTask: a.currentTaskType ?? null,
+      position: a.lastKnownLocation ?? null,
+      inventory: a.inventoryMap ?? {},
+    }));
+
+    const activeGoals = await goalBoard.getActiveGoals();
+    const goals: CoordinatorStatePayload['goals'] = activeGoals.map((g: any) => ({
+      goalId: g.goalId,
+      description: g.description,
+      priority: g.priority,
+      status: g.status ?? 'active',
+    }));
+
+    const payload: CoordinatorStatePayload = {
+      goals,
+      agents: agentList,
+      whitelist: { enabled: chatWhitelist.enabled, players: [...chatWhitelist.players] },
+    };
+    broadcastToFrontends(MsgType.CoordinatorState, payload);
+  } catch (error) {
+    logger.error('Failed to broadcast coordinator state', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+// Mirror coordinator chat replies (the messagePlayer tool) to the web frontend
+// so web users see the answer even with no in-game agent connected.
+llm.setChatNotifier((message) => {
+  broadcastToFrontends(MsgType.CoordinatorChat, {
+    from: 'Coordinator',
+    kind: 'coordinator',
+    message,
+    ts: new Date().toISOString(),
+  });
+});
 
 // --- WebSocket Server ---
 const wss = new WebSocketServer({ port: config.COORDINATOR_WS_PORT });
@@ -146,13 +220,37 @@ wss.on('connection', (ws: WebSocket) => {
         logger.info(`Agent event: ${eventType} from ${agentId}`, { shouldReplan });
 
         if (eventType === 'playerChat') {
-          // Always invoke coordinator for player chat
-          llm.invoke({
-            type: 'playerChat',
-            agentId,
-            playerName: event.details?.playerName ?? 'unknown',
-            message: event.details?.message ?? '',
+          const playerName = event.details?.playerName ?? 'unknown';
+          const chatText = event.details?.message ?? '';
+
+          // Mirror the in-game chat to the web frontend first (always visible).
+          broadcastToFrontends(MsgType.CoordinatorChat, {
+            from: playerName,
+            kind: 'player',
+            message: chatText,
+            ts: new Date().toISOString(),
           });
+
+          // Enforce the whitelist: when enabled, only listed players may command
+          // the swarm. Non-whitelisted chat is mirrored above but does NOT invoke
+          // the LLM. Web chat (frontend::chat) bypasses this entirely.
+          if (chatWhitelist.enabled && !chatWhitelist.players.has(playerName)) {
+            logger.info('Ignored non-whitelisted chat', { playerName });
+            broadcastToFrontends(MsgType.CoordinatorChat, {
+              from: 'System',
+              kind: 'system',
+              message: `Ignored chat from non-whitelisted player "${playerName}".`,
+              ts: new Date().toISOString(),
+            });
+          } else {
+            // Whitelisted (or whitelist disabled) — invoke the coordinator.
+            llm.invoke({
+              type: 'playerChat',
+              agentId,
+              playerName,
+              message: chatText,
+            });
+          }
         } else if (shouldReplan) {
           llm.invoke({ type: eventType, agentId, event });
         }
@@ -172,11 +270,43 @@ wss.on('connection', (ws: WebSocket) => {
       else if (parsed.type === MsgType.FrontendRegister) {
         logger.info('Frontend client registered');
         connectedFrontendClients.add(ws);
+        // Give the freshly-registered client an immediate state snapshot.
+        void broadcastState();
       }
       else if (parsed.type === MsgType.FrontendStartGoal) {
         const { goal, count } = (parsed.payload ?? {}) as { goal?: string; count?: number };
         logger.info(`Goal from frontend: ${count ?? 1}x ${goal}`);
         llm.invoke({ type: 'startGoal', goal, count: count ?? 1 });
+      }
+      else if (parsed.type === MsgType.FrontendGetState) {
+        void broadcastState();
+      }
+      else if (parsed.type === MsgType.FrontendChat) {
+        const { message, sender } = (parsed.payload ?? {}) as { message?: string; sender?: string };
+        const from = sender || 'Web';
+        const text = message ?? '';
+        logger.info('Chat from frontend', { from });
+        // Mirror the web user's message to all frontends.
+        broadcastToFrontends(MsgType.CoordinatorChat, {
+          from,
+          kind: 'player',
+          message: text,
+          ts: new Date().toISOString(),
+        });
+        // Web chat bypasses the whitelist (trusted/local user).
+        llm.invoke({ type: 'playerChat', playerName: from, message: text, source: 'frontend' });
+      }
+      else if (parsed.type === MsgType.FrontendUpdateWhitelist) {
+        const { enabled, players } = (parsed.payload ?? {}) as { enabled?: boolean; players?: unknown[] };
+        chatWhitelist.enabled = !!enabled;
+        chatWhitelist.players = new Set(
+          (players ?? []).map((s) => String(s).trim()).filter(Boolean),
+        );
+        logger.info('Whitelist updated from frontend', {
+          enabled: chatWhitelist.enabled,
+          players: [...chatWhitelist.players],
+        });
+        void broadcastState();
       }
 
     } catch (error) {
@@ -220,6 +350,14 @@ const supervisorTimer = setInterval(() => {
     logger.error('Supervisor tick failed', { error: error instanceof Error ? error.message : String(error) });
   });
 }, SUPERVISOR_INTERVAL_MS);
+
+// --- Periodic Frontend State Push ---
+// Light keep-fresh broadcast so registered web clients reflect agent/goal/
+// whitelist changes that aren't tied to an explicit request. broadcastState is
+// internally try/catch-guarded so a transient goal-board fetch error is swallowed.
+const stateBroadcastTimer = setInterval(() => {
+  void broadcastState();
+}, 3000);
 
 // --- Health Checks ---
 const healthCheck = new HealthCheck('coordinator', '0.1.0');
@@ -289,6 +427,7 @@ const shutdown = createGracefulShutdown(logger);
 
 shutdown.register(async () => {
   clearInterval(supervisorTimer);
+  clearInterval(stateBroadcastTimer);
 });
 
 shutdown.register(async () => {

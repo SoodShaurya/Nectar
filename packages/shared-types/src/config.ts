@@ -21,6 +21,10 @@ export const coordinatorConfigSchema = z.object({
   // Optional shared secret. When set, BSMs must present a matching token to
   // register. Leave unset to disable auth (local dev).
   CLUSTER_AUTH_TOKEN: z.string().optional(),
+  // Comma-separated usernames seeding the in-game chat whitelist. When
+  // non-empty the whitelist defaults to enabled (only listed players may
+  // command the swarm via in-game chat). Editable at runtime from the web UI.
+  COORDINATOR_CHAT_WHITELIST: z.string().optional(),
 });
 
 export type CoordinatorConfig = z.infer<typeof coordinatorConfigSchema>;
