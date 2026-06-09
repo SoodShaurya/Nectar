@@ -5,11 +5,25 @@ const path = require('path');
 
 // --- Configuration ---
 const PORT = process.env.FRONTEND_PORT || 8080;
-const ORCHESTRATOR_WS_ADDRESS = process.env.ORCHESTRATOR_WS_ADDRESS || 'ws://localhost:5001'; // Default Orchestrator WS port
+// Upstream coordinator WS address. Prefer COORDINATOR_WS_ADDRESS; fall back to
+// the legacy ORCHESTRATOR_WS_ADDRESS for back-compat with older deployments.
+const COORDINATOR_WS_ADDRESS =
+    process.env.COORDINATOR_WS_ADDRESS ||
+    process.env.ORCHESTRATOR_WS_ADDRESS ||
+    'ws://localhost:5001'; // Default Coordinator WS port
+
+// Browser → coordinator forwardable message types. Anything not on this
+// allowlist is dropped (this stays a thin, well-scoped relay).
+const FORWARDABLE_TYPES = new Set([
+    'frontend::chat',
+    'frontend::startGoal',
+    'frontend::updateWhitelist',
+    'frontend::getState',
+]);
 
 console.log(`--- Frontend Service ---`);
 console.log(`HTTP Port: ${PORT}`);
-console.log(`Orchestrator WS Address: ${ORCHESTRATOR_WS_ADDRESS}`);
+console.log(`Coordinator WS Address: ${COORDINATOR_WS_ADDRESS}`);
 
 // --- Express App Setup ---
 const app = express();
@@ -23,40 +37,50 @@ app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// --- WebSocket Client (Connects to Orchestrator) ---
-let orchestratorSocket = null;
+// --- WebSocket Client (Connects to Coordinator) ---
+let coordinatorSocket = null;
 let frontendWsServer = null; // WebSocket server for browser clients
 
-function connectToOrchestrator() {
-    console.log(`Connecting to Orchestrator at ${ORCHESTRATOR_WS_ADDRESS}...`);
-    orchestratorSocket = new WebSocket(ORCHESTRATOR_WS_ADDRESS);
+// Send a frontend::getState request upstream to fetch the current snapshot.
+function requestState() {
+    if (coordinatorSocket && coordinatorSocket.readyState === WebSocket.OPEN) {
+        coordinatorSocket.send(JSON.stringify({ type: 'frontend::getState', payload: {} }));
+    }
+}
 
-    orchestratorSocket.on('open', () => {
-        console.log('Connected to Orchestrator.');
-        // Register frontend with Orchestrator (optional, depends on Orchestrator design)
+function connectToCoordinator() {
+    console.log(`Connecting to Coordinator at ${COORDINATOR_WS_ADDRESS}...`);
+    coordinatorSocket = new WebSocket(COORDINATOR_WS_ADDRESS);
+
+    coordinatorSocket.on('open', () => {
+        console.log('Connected to Coordinator.');
+        // Register frontend with Coordinator so it receives broadcasts.
         const registrationMessage = { type: 'frontend::register', senderId: 'frontend-ui', payload: {} };
-        orchestratorSocket.send(JSON.stringify(registrationMessage));
+        coordinatorSocket.send(JSON.stringify(registrationMessage));
+        // Request an initial state snapshot.
+        requestState();
     });
 
-    orchestratorSocket.on('message', (data) => {
+    coordinatorSocket.on('message', (data) => {
         try {
             const message = JSON.parse(data.toString());
-            console.log('Message from Orchestrator:', message.type);
-            // Forward relevant messages to connected browser clients
+            console.log('Message from Coordinator:', message.type);
+            // Forward ALL coordinator messages to connected browser clients
+            // (coordinator::chat, coordinator::state, etc.).
             broadcastToBrowsers(message);
         } catch (error) {
-            console.error('Failed to parse message from Orchestrator:', error);
+            console.error('Failed to parse message from Coordinator:', error);
         }
     });
 
-    orchestratorSocket.on('close', () => {
-        console.warn('Disconnected from Orchestrator. Attempting reconnect...');
-        orchestratorSocket = null;
-        setTimeout(connectToOrchestrator, 5000); // Reconnect after 5 seconds
+    coordinatorSocket.on('close', () => {
+        console.warn('Disconnected from Coordinator. Attempting reconnect...');
+        coordinatorSocket = null;
+        setTimeout(connectToCoordinator, 5000); // Reconnect after 5 seconds
     });
 
-    orchestratorSocket.on('error', (error) => {
-        console.error('Orchestrator WebSocket error:', error.message);
+    coordinatorSocket.on('error', (error) => {
+        console.error('Coordinator WebSocket error:', error.message);
         // Reconnect logic is handled by 'close' event
     });
 }
@@ -69,22 +93,28 @@ function setupBrowserWebSocketServer() {
     frontendWsServer.on('connection', (ws) => {
         console.log('Browser client connected.');
 
+        // A new browser just connected — pull a fresh state snapshot from the
+        // coordinator so this client renders current goals/agents/whitelist
+        // quickly (the resulting coordinator::state is broadcast to all).
+        requestState();
+
         ws.on('message', (message) => {
             try {
                 const parsedMessage = JSON.parse(message.toString());
                 console.log('Message from browser:', parsedMessage.type);
 
-                // Handle commands from the browser UI (e.g., start goal)
-                if (parsedMessage.type === 'frontend::startGoal') {
-                    if (orchestratorSocket && orchestratorSocket.readyState === WebSocket.OPEN) {
-                        console.log('Forwarding startGoal command to Orchestrator.');
-                        orchestratorSocket.send(JSON.stringify(parsedMessage));
+                // Relay allowlisted browser commands upstream to the coordinator.
+                if (FORWARDABLE_TYPES.has(parsedMessage.type)) {
+                    if (coordinatorSocket && coordinatorSocket.readyState === WebSocket.OPEN) {
+                        console.log(`Forwarding ${parsedMessage.type} to Coordinator.`);
+                        coordinatorSocket.send(JSON.stringify(parsedMessage));
                     } else {
-                        console.warn('Cannot forward startGoal: Not connected to Orchestrator.');
-                        ws.send(JSON.stringify({ type: 'error', payload: 'Not connected to Orchestrator' }));
+                        console.warn(`Cannot forward ${parsedMessage.type}: Not connected to Coordinator.`);
+                        ws.send(JSON.stringify({ type: 'error', payload: 'Not connected to Coordinator' }));
                     }
+                } else {
+                    console.warn(`Dropping non-forwardable browser message type: ${parsedMessage.type}`);
                 }
-                // Handle other commands if needed
             } catch (error) {
                 console.error('Failed to parse message from browser:', error);
             }
@@ -114,7 +144,7 @@ function broadcastToBrowsers(message) {
 server.listen(PORT, () => {
     console.log(`Frontend HTTP server listening on port ${PORT}`);
     setupBrowserWebSocketServer();
-    connectToOrchestrator(); // Start connection attempt to Orchestrator
+    connectToCoordinator(); // Start connection attempt to Coordinator
 });
 
 // --- Graceful Shutdown ---
@@ -123,8 +153,8 @@ function shutdown() {
     if (frontendWsServer) {
         frontendWsServer.close(() => console.log('Browser WebSocket server closed.'));
     }
-    if (orchestratorSocket) {
-        orchestratorSocket.close(() => console.log('Orchestrator WebSocket connection closed.'));
+    if (coordinatorSocket) {
+        coordinatorSocket.close(() => console.log('Coordinator WebSocket connection closed.'));
     }
     server.close(() => {
         console.log('HTTP server closed.');

@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Aetherius — Control Panel</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-cube" aria-hidden="true"></span>
+      <span class="brand-name">AETHERIUS</span>
+      <span class="brand-sub">swarm control panel</span>
+    </div>
+    <div class="conn">
+      <span id="conn-dot" class="conn-dot" data-state="disconnected" title="Disconnected"></span>
+      <span id="conn-label" class="conn-label">disconnected</span>
+    </div>
+  </header>
+
+  <main class="app">
+    <!-- ===================== LEFT: CHAT ===================== -->
+    <section class="panel chat" aria-label="Chat">
+      <div class="panel-head">
+        <h2>Chat</h2>
+        <span class="hint">in-game + coordinator</span>
+      </div>
+
+      <div id="chat-log" class="chat-log" role="log" aria-live="polite">
+        <!-- chat lines injected here -->
+      </div>
+
+      <form id="chat-form" class="chat-form" autocomplete="off">
+        <div class="chat-sender">
+          <label for="sender-input">as</label>
+          <input id="sender-input" class="sender-input" type="text" value="Web"
+                 maxlength="24" spellcheck="false" aria-label="Your sender name" />
+        </div>
+        <input id="chat-input" class="chat-input" type="text" placeholder="Message the swarm…"
+               maxlength="500" spellcheck="false" aria-label="Chat message" />
+        <button id="chat-send" class="btn btn-send" type="submit">Send</button>
+      </form>
+    </section>
+
+    <!-- ===================== RIGHT: DASHBOARD ===================== -->
+    <section class="dashboard" aria-label="Dashboard">
+
+      <!-- GOALS -->
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Goals</h2>
+          <span id="goals-count" class="badge-count">0</span>
+        </div>
+        <div id="goals-list" class="card-list">
+          <p class="empty">No active goals.</p>
+        </div>
+
+        <form id="goal-form" class="inline-form" autocomplete="off">
+          <input id="goal-input" class="inline-input" type="text"
+                 placeholder="Start a goal…" maxlength="300" aria-label="New goal" />
+          <button class="btn" type="submit">Start</button>
+        </form>
+      </div>
+
+      <!-- AGENTS -->
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Agents</h2>
+          <span id="agents-count" class="badge-count">0</span>
+        </div>
+        <div id="agents-list" class="card-list">
+          <p class="empty">No agents online.</p>
+        </div>
+      </div>
+
+      <!-- WHITELIST -->
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Whitelist</h2>
+        </div>
+
+        <label class="wl-toggle">
+          <input id="wl-enabled" type="checkbox" />
+          <span class="wl-toggle-track"><span class="wl-toggle-thumb"></span></span>
+          <span class="wl-toggle-text">Enabled</span>
+        </label>
+
+        <div id="wl-chips" class="wl-chips">
+          <!-- username chips injected here -->
+        </div>
+
+        <form id="wl-add-form" class="inline-form" autocomplete="off">
+          <input id="wl-add-input" class="inline-input" type="text"
+                 placeholder="Add username…" maxlength="32" spellcheck="false"
+                 aria-label="Add whitelist username" />
+          <button class="btn" type="submit">Add</button>
+        </form>
+
+        <div class="wl-footer">
+          <button id="wl-save" class="btn btn-primary" type="button">Save</button>
+          <span id="wl-status" class="wl-status"></span>
+        </div>
+
+        <p class="note">Whitelist gates in-game player chat only; the web panel always works.</p>
+      </div>
+
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

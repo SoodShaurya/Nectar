@@ -50,6 +50,15 @@ export const MsgType = {
   // Frontend → Coordinator
   FrontendRegister: 'frontend::register',
   FrontendStartGoal: 'frontend::startGoal',
+
+  // Frontend (browser via relay) → Coordinator
+  FrontendChat: 'frontend::chat', // payload: { message: string, sender?: string }
+  FrontendUpdateWhitelist: 'frontend::updateWhitelist', // payload: { enabled: boolean, players: string[] }
+  FrontendGetState: 'frontend::getState', // payload: {}
+
+  // Coordinator → Frontend (broadcast to registered frontend clients)
+  CoordinatorChat: 'coordinator::chat', // payload: { from: string, kind: 'coordinator'|'player'|'system', message: string, ts: string }
+  CoordinatorState: 'coordinator::state', // payload: CoordinatorStatePayload
 } as const;
 
 export type MsgTypeValue = (typeof MsgType)[keyof typeof MsgType];
@@ -152,6 +161,46 @@ export const agentRegisterPayloadSchema = z.object({
   agentId: z.string().min(1),
   authToken: z.string().optional(),
 }).loose();
+
+// ---------------------------------------------------------------------------
+// Frontend (web via relay) ↔ Coordinator payload schemas + types
+// ---------------------------------------------------------------------------
+
+/** frontend::chat — a chat message typed by the web user. */
+export const frontendChatPayloadSchema = z.object({
+  message: z.string(),
+  sender: z.string().optional(),
+});
+
+/** frontend::updateWhitelist — runtime edit of the in-game chat whitelist. */
+export const frontendUpdateWhitelistPayloadSchema = z.object({
+  enabled: z.boolean(),
+  players: z.array(z.string()),
+});
+
+/** coordinator::chat — a chat line broadcast to registered frontend clients. */
+export const coordinatorChatPayloadSchema = z.object({
+  from: z.string(),
+  kind: z.enum(['coordinator', 'player', 'system']),
+  message: z.string(),
+  /** ISO-8601 timestamp of the moment the line was produced. */
+  ts: z.string(),
+});
+
+export type CoordinatorChatPayload = z.infer<typeof coordinatorChatPayloadSchema>;
+
+/** coordinator::state — full snapshot pushed to frontend clients. */
+export interface CoordinatorStatePayload {
+  goals: Array<{ goalId: string; description: string; priority: string; status: string }>;
+  agents: Array<{
+    agentId: string;
+    status: string;
+    currentTask: string | null;
+    position: { x: number; y: number; z: number } | null;
+    inventory: Record<string, number>;
+  }>;
+  whitelist: { enabled: boolean; players: string[] };
+}
 
 // ---------------------------------------------------------------------------
 // Parse / construct helpers

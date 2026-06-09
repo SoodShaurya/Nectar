@@ -22,6 +22,12 @@ export interface ToolContext {
   worldState: WorldStateClient;
   goalBoard: GoalBoard;
   mcVersion: string;
+  /**
+   * Optional sink that mirrors a coordinator chat reply to the web frontend.
+   * Called for every messagePlayer so web users always see replies, even when
+   * no in-game agent is connected to relay the message into Minecraft.
+   */
+  notifyChat?: (message: string) => void;
 }
 
 export async function executeTool(name: string, args: any, ctx: ToolContext): Promise<any> {
@@ -125,13 +131,19 @@ export async function executeTool(name: string, args: any, ctx: ToolContext): Pr
     }
 
     case 'messagePlayer': {
-      // Send via any available agent
+      // ALWAYS mirror the reply to the web frontend first so web users see it
+      // even when no in-game agent is connected to relay it into Minecraft.
+      ctx.notifyChat?.(args.message);
+
+      // Best-effort: also speak it in-game via any available agent. Do not fail
+      // the tool if none is connected — the web user already received the reply.
       const anyAgent = agents.getAllAgents().find(a => a.status !== 'unknown');
-      if (!anyAgent) {
-        return { success: false, error: 'No agents available to send chat' };
-      }
-      const success = agents.sendChatMessage(anyAgent.agentId, args.message);
-      return { success, status: success ? 'Message sent' : 'Failed to send' };
+      const sentInGame = anyAgent ? agents.sendChatMessage(anyAgent.agentId, args.message) : false;
+
+      return {
+        success: true,
+        status: sentInGame ? 'Message sent (in-game + web)' : 'Message sent (web only — no in-game agent)',
+      };
     }
 
     default:
