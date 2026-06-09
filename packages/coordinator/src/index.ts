@@ -1,0 +1,304 @@
+/**
+ * Aetherius Coordinator — Entry Point
+ *
+ * Conversational LLM agent that manages a goal board, assigns tasks directly
+ * to agents via BSM, and converses with players through Minecraft chat.
+ */
+
+import WebSocket, { WebSocketServer } from 'ws';
+import http from 'http';
+import {
+  createLogger,
+  validateConfig,
+  coordinatorConfigSchema,
+  createGracefulShutdown,
+  HealthCheck,
+  metrics,
+  MsgType,
+  parseWsMessage,
+  validatePayload,
+  bsmRegisterPayloadSchema,
+  commandAckPayloadSchema,
+  checkAuthToken,
+} from '@aetherius/shared-types';
+import { AgentManager } from './agents';
+import { WorldStateClient } from './world-state';
+import { GoalBoard } from './goal-board';
+import { CoordinatorLLM } from './llm';
+import { supervisorTick } from './supervisor';
+
+const logger = createLogger('coordinator');
+const config = validateConfig(coordinatorConfigSchema, 'Coordinator');
+
+logger.info('Starting Coordinator', {
+  httpPort: config.COORDINATOR_PORT,
+  wsPort: config.COORDINATOR_WS_PORT,
+  worldStateApi: config.WORLD_STATE_API_ADDRESS,
+});
+
+// --- Core Components ---
+const agents = new AgentManager();
+const worldState = new WorldStateClient(config.WORLD_STATE_API_ADDRESS);
+const goalBoard = new GoalBoard(config.WORLD_STATE_API_ADDRESS);
+const llm = new CoordinatorLLM(
+  config.DEEPSEEK_API_KEY,
+  agents,
+  worldState,
+  goalBoard,
+  config.MC_VERSION,
+  config.COORDINATOR_MODEL,
+);
+
+// AgentManager surfaces lifecycle changes that require the LLM to re-evaluate
+// (ack timeout, BSM disconnect with an active task). index.ts owns the LLM, so
+// it subscribes here and triggers a replan (design [A] step 6 / [B]).
+agents.on('replan', (info: { reason: string; agentId?: string; bsmId?: string }) => {
+  logger.info('Replan triggered by AgentManager', info);
+  llm.invoke({ type: 'replan', ...info });
+});
+
+// One-time warning that cluster auth is disabled (design [D]).
+let authDisabledWarned = false;
+
+// --- Frontend Clients ---
+const connectedFrontendClients: Set<WebSocket> = new Set();
+
+// --- WebSocket Server ---
+const wss = new WebSocketServer({ port: config.COORDINATOR_WS_PORT });
+logger.info('Coordinator WebSocket server started', { port: config.COORDINATOR_WS_PORT });
+
+wss.on('connection', (ws: WebSocket) => {
+  logger.debug('WS client connected');
+  metrics.increment('ws_connections');
+
+  ws.on('message', (message: Buffer) => {
+    // Boundary validation (design [E]): parse + envelope-validate before use.
+    const parsedResult = parseWsMessage(message);
+    if (!parsedResult.ok) {
+      logger.warn('Dropping invalid WS message', { error: parsedResult.error });
+      metrics.increment('ws_messages_invalid');
+      return;
+    }
+    const parsed = parsedResult.value;
+    metrics.increment('ws_messages_received');
+
+    try {
+      // --- BSM Registration ---
+      if (parsed.type === MsgType.BsmRegister) {
+        const payloadResult = validatePayload(bsmRegisterPayloadSchema, parsed.payload);
+        if (!payloadResult.ok) {
+          logger.warn('Dropping invalid bsm::register payload', { error: payloadResult.error });
+          metrics.increment('ws_messages_invalid');
+          return;
+        }
+        // Use the ORIGINAL payload (validatePayload does not strip fields).
+        const payload = parsed.payload as {
+          bsmId: string; address: string; capacity?: number;
+          agents: Array<{ agentId: string; status?: string }>; authToken?: string;
+        };
+
+        // Auth handshake (design [D]).
+        if (!config.CLUSTER_AUTH_TOKEN && !authDisabledWarned) {
+          logger.warn('Cluster auth is DISABLED (CLUSTER_AUTH_TOKEN unset) — accepting all BSM registrations');
+          authDisabledWarned = true;
+        }
+        if (!checkAuthToken(config.CLUSTER_AUTH_TOKEN, payload.authToken)) {
+          logger.warn('Rejecting bsm::register — invalid auth token', { bsmId: payload.bsmId });
+          metrics.increment('bsm_auth_rejected');
+          ws.close();
+          return;
+        }
+
+        agents.registerBSM(payload.bsmId, payload.address, ws, payload.agents);
+      }
+
+      // --- Command Acknowledgments (relayed by BSM) ---
+      else if (parsed.type === MsgType.AgentCommandAck) {
+        // Boundary validation (design [E]): the ack is a high-value lifecycle payload.
+        const ackResult = validatePayload(commandAckPayloadSchema, parsed.payload);
+        if (!ackResult.ok) {
+          logger.warn('Dropping invalid agent::commandAck payload', { error: ackResult.error });
+          metrics.increment('ws_messages_invalid');
+          return;
+        }
+        const payload = parsed.payload as {
+          agentId?: string; taskId?: string; accepted?: boolean; reason?: string;
+        };
+        const agentId = payload.agentId ?? parsed.senderId;
+        if (!agentId) {
+          logger.warn('Dropping command ack with no agentId');
+          return;
+        }
+        const { shouldReplan } = agents.handleCommandAck(agentId, payload);
+        if (shouldReplan) {
+          // Rejected command — let the coordinator re-evaluate (design [A] step 5).
+          llm.invoke({ type: 'taskRejected', agentId, reason: payload.reason, taskId: payload.taskId });
+        }
+      }
+
+      // --- Agent Events (routed via BSM) ---
+      else if (parsed.type.startsWith(MsgType.AgentEventPrefix)) {
+        const event: any = parsed.payload;
+        const agentId = event?.agentId ?? parsed.senderId;
+        if (!agentId) return;
+
+        const { shouldReplan, eventType } = agents.handleAgentEvent(agentId, event);
+        logger.info(`Agent event: ${eventType} from ${agentId}`, { shouldReplan });
+
+        if (eventType === 'playerChat') {
+          // Always invoke coordinator for player chat
+          llm.invoke({
+            type: 'playerChat',
+            agentId,
+            playerName: event.details?.playerName ?? 'unknown',
+            message: event.details?.message ?? '',
+          });
+        } else if (shouldReplan) {
+          llm.invoke({ type: eventType, agentId, event });
+        }
+      }
+
+      // --- Agent Status Updates ---
+      else if (parsed.type === MsgType.AgentStatusUpdate) {
+        const snapshot: any = parsed.payload;
+        const agentId = snapshot?.agentId ?? parsed.senderId;
+        if (agentId) {
+          agents.updateAgentStatus(agentId, snapshot);
+          // Status updates do NOT trigger the coordinator (too frequent)
+        }
+      }
+
+      // --- Frontend ---
+      else if (parsed.type === MsgType.FrontendRegister) {
+        logger.info('Frontend client registered');
+        connectedFrontendClients.add(ws);
+      }
+      else if (parsed.type === MsgType.FrontendStartGoal) {
+        const { goal, count } = (parsed.payload ?? {}) as { goal?: string; count?: number };
+        logger.info(`Goal from frontend: ${count ?? 1}x ${goal}`);
+        llm.invoke({ type: 'startGoal', goal, count: count ?? 1 });
+      }
+
+    } catch (error) {
+      logger.error('Failed to handle WS message', { error });
+    }
+  });
+
+  ws.on('close', () => {
+    connectedFrontendClients.delete(ws);
+    const disconnectedBsm = agents.handleBSMDisconnect(ws);
+    if (disconnectedBsm) {
+      logger.info(`BSM ${disconnectedBsm} disconnected`);
+    }
+  });
+
+  ws.on('error', (error: Error) => {
+    logger.error('WebSocket error', { error });
+    connectedFrontendClients.delete(ws);
+    agents.handleBSMDisconnect(ws);
+  });
+});
+
+// --- Deterministic Supervisor Tick ---
+// The coordinator is primarily event-driven (player chat, task complete/fail,
+// ack timeout, BSM disconnect all push an invoke immediately). This tick is the
+// cheap, non-LLM backstop that catches drift no event reports. It only spends an
+// LLM call when a deterministic condition actually fires, so an idle-but-active
+// swarm costs ~nothing instead of a reasoning call every 60s.
+const SUPERVISOR_INTERVAL_MS = 15000; // cheap deterministic check; safe to run often
+// A 'busy' (acked) task running this long with no completion event is a stall.
+const STALL_AFTER_MS = 300000; // 5 min — generous; the LLM decides what to do
+// If the event stream has been silent this long despite open work, do one sweep.
+const QUIET_BACKSTOP_MS = 120000; // 2 min
+
+const supervisorTimer = setInterval(() => {
+  supervisorTick(
+    { agents, goalBoard, llm },
+    { stallAfterMs: STALL_AFTER_MS, quietBackstopMs: QUIET_BACKSTOP_MS },
+    Date.now(),
+  ).catch((error) => {
+    logger.error('Supervisor tick failed', { error: error instanceof Error ? error.message : String(error) });
+  });
+}, SUPERVISOR_INTERVAL_MS);
+
+// --- Health Checks ---
+const healthCheck = new HealthCheck('coordinator', '0.1.0');
+
+healthCheck.registerDependency('world-state-service', async () => {
+  return await worldState.healthCheck();
+});
+
+healthCheck.registerDependency('deepseek-api', async () => {
+  const state = llm.getCircuitBreakerState();
+  if (state === 'open') {
+    return { status: 'degraded' as const, error: 'Circuit breaker open' };
+  }
+  return { status: 'connected' as const };
+});
+
+// --- HTTP Server ---
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url || '/', `http://${req.headers.host}`);
+
+  if (url.pathname === '/health' && req.method === 'GET') {
+    try {
+      const health = await healthCheck.check();
+      const statusCode = health.status === 'healthy' ? 200 : health.status === 'degraded' ? 200 : 503;
+      res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(health));
+    } catch (error) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ service: 'coordinator', status: 'unhealthy', error: String(error) }));
+    }
+    return;
+  }
+
+  if (url.pathname === '/metrics' && req.method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(metrics.getAllMetrics()));
+    return;
+  }
+
+  // Default status
+  let activeGoals: any[] = [];
+  try { activeGoals = await goalBoard.getActiveGoals(); } catch {}
+
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({
+    status: 'Coordinator Running',
+    activeGoals: activeGoals.map(g => ({ id: g.goalId, description: g.description, priority: g.priority })),
+    knownBSMs: agents.getBSMCount(),
+    knownAgents: agents.getAgentCount(),
+    idleAgents: agents.getIdleAgents().length,
+    busyAgents: agents.getBusyAgents().length,
+  }));
+});
+
+server.listen(config.COORDINATOR_PORT, () => {
+  logger.info('Coordinator HTTP server listening', {
+    port: config.COORDINATOR_PORT,
+    endpoints: ['/health', '/metrics', '/'],
+  });
+});
+
+// --- Startup ---
+logger.info('Coordinator started. Waiting for connections...');
+
+// --- Graceful Shutdown ---
+const shutdown = createGracefulShutdown(logger);
+
+shutdown.register(async () => {
+  clearInterval(supervisorTimer);
+});
+
+shutdown.register(async () => {
+  logger.info('Closing WebSocket server...');
+  wss.close();
+});
+
+shutdown.register(async () => {
+  logger.info('Closing HTTP server...');
+  return new Promise<void>((resolve) => {
+    server.close(() => resolve());
+  });
+});

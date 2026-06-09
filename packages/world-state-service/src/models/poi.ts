@@ -5,6 +5,7 @@ import { Coordinates } from '@aetherius/shared-types'; // Assuming Coordinates i
 export interface IPOI extends Document {
   reporterAgentId: string;
   timestamp: Date;
+  lastUpdated: Date; // Updated whenever an existing POI is re-reported (upsert)
   type: string; // e.g., "CaveEntrance", "VillageChurch", "Spawner", "EndPortalFrame"
   name?: string; // Optional user-friendly name
   coords: Coordinates;
@@ -15,6 +16,7 @@ export interface IPOI extends Document {
 const POISchema: Schema = new Schema({
   reporterAgentId: { type: String, required: true, index: true },
   timestamp: { type: Date, default: Date.now, index: true },
+  lastUpdated: { type: Date, default: Date.now, index: true },
   type: { type: String, required: true, index: true },
   name: { type: String },
   coords: {

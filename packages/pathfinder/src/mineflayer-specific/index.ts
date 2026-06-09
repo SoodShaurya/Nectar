@@ -1,1 +1,0 @@
-export { MovementHandler } from './movements'

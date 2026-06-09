@@ -6,7 +6,8 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/index.js", 
+    "start": "node dist/index.js",
+    "test:modules": "node dist/test-modules.js",
     "watch": "tsc -w"
   },
   "keywords": [
@@ -20,13 +21,20 @@
   "license": "MIT",
   "dependencies": {
     "@aetherius/shared-types": "workspace:*",
-    "@aetherius/mineflayer-core": "workspace:*", 
-    "@aetherius/pathfinder": "workspace:*", 
-    "@aetherius/combat": "workspace:*",
-    "ws": "^8.18.0",
-    "prismarine-item": "^1.15.0",
+    "@nxg-org/mineflayer-auto-armor": "^1.2.2",
+    "@nxg-org/mineflayer-auto-eat": "^2.4.1",
+    "@nxg-org/mineflayer-custom-pvp": "^1.7.6",
+    "minecraft-data": "^3.110.2",
+    "minecraft-protocol": "^1.66.2",
+    "mineflayer": "^4.37.1",
+    "mineflayer-pathfinder": "^2.4.5",
+    "mineflayer-tool": "^1.2.0",
+    "prismarine-block": "^1.23.0",
+    "prismarine-entity": "^2.5.0",
+    "prismarine-item": "^1.18.0",
     "prismarine-recipe": "^1.3.0",
-    "prismarine-block": "^1.17.0"
+    "vec3": "^0.1.8",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^20.14.10",

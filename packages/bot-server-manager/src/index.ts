@@ -4,7 +4,6 @@ import net from 'net';
 import { fork, ChildProcess } from 'child_process';
 import path from 'path';
 import {
-  WebSocketMessage,
   AgentStatusSnapshot,
   AgentEvent,
   WorldStateReportPayload,
@@ -14,7 +13,20 @@ import {
   createGracefulShutdown,
   HealthCheck,
   HealthChecks,
-  metrics
+  metrics,
+  MsgType,
+  TcpMsgType,
+  agentEventType,
+  parseWsMessage,
+  parseTcpMessage,
+  makeWsMessage,
+  validatePayload,
+  checkAuthToken,
+  agentCommandPayloadSchema,
+  cancelTaskPayloadSchema,
+  chatMessagePayloadSchema,
+  updateProfilePayloadSchema,
+  agentRegisterPayloadSchema
 } from '@aetherius/shared-types';
 
 // --- Initialize Logger ---
@@ -25,16 +37,34 @@ const config = validateConfig(bsmConfigSchema, 'Bot Server Manager');
 
 const WS_PORT = config.BSM_WS_PORT;
 const LOCAL_AGENT_PORT = config.BSM_AGENT_PORT;
-const ORCHESTRATOR_ADDRESS = config.ORCHESTRATOR_ADDRESS;
+// Upstream coordinator address: COORDINATOR_ADDRESS is preferred; ORCHESTRATOR_ADDRESS
+// remains a deprecated fallback for older deployments.
+const COORDINATOR_ADDRESS =
+  config.COORDINATOR_ADDRESS ?? config.ORCHESTRATOR_ADDRESS ?? 'ws://localhost:5001';
+if (!config.COORDINATOR_ADDRESS && config.ORCHESTRATOR_ADDRESS) {
+  logger.warn(
+    'ORCHESTRATOR_ADDRESS is deprecated; please set COORDINATOR_ADDRESS instead.'
+  );
+}
 const WORLD_STATE_API_ADDRESS = config.WORLD_STATE_API_ADDRESS;
 const BSM_ID = config.BSM_ID || `bsm-${Math.random().toString(36).substring(2, 8)}`;
 const AGENT_SCRIPT_PATH = config.AGENT_SCRIPT_PATH || '../bot-agent/dist/index.js';
+
+// --- Auth (optional cluster shared secret) ---
+// If CLUSTER_AUTH_TOKEN is unset, auth is disabled (local-dev default). Log it once.
+if (!config.CLUSTER_AUTH_TOKEN) {
+  logger.warn('CLUSTER_AUTH_TOKEN is not set — agent/coordinator auth is DISABLED.');
+}
+
+// --- Outbound queue tuning ---
+const AGENT_OUTBOUND_QUEUE_CAP = 50; // per-agent FIFO cap (BSM -> agent)
+const UPSTREAM_QUEUE_CAP = 50; // buffered frames for coordinator (BSM -> coordinator)
 
 logger.info('Starting Bot Server Manager', {
   bsmId: BSM_ID,
   wsPort: WS_PORT,
   agentPort: LOCAL_AGENT_PORT,
-  orchestratorAddress: ORCHESTRATOR_ADDRESS,
+  coordinatorAddress: COORDINATOR_ADDRESS,
   worldStateApi: WORLD_STATE_API_ADDRESS,
   agentScriptPath: AGENT_SCRIPT_PATH
 });
@@ -44,17 +74,68 @@ interface ManagedAgent {
     process: ChildProcess;
     localSocket: net.Socket | null;
     status: 'starting' | 'running' | 'stopped' | 'errored';
-    commanderId: string | null; // Orchestrator or SquadLeader ID
-    globalAgentId: string; // The ID known by the Orchestrator
+    commanderId: string | null; // Commander ID (always 'coordinator' now)
+    globalAgentId: string; // The ID known by the coordinator
+    // Bounded FIFO of newline-terminated frames waiting for the agent's TCP socket
+    // to become writable. Flushed in order on (re)connect/registration.
+    outboundQueue: string[];
 }
 const managedAgents: Map<string, ManagedAgent> = new Map(); // Key: globalAgentId
 
 interface ConnectedClient {
     ws: WebSocket;
-    type: 'orchestrator' | 'squadLeader';
-    id: string; // Orchestrator ID or SquadLeader ID
+    type: 'coordinator';
+    id: string; // Coordinator ID
 }
 const connectedWSClients: Map<WebSocket, ConnectedClient> = new Map(); // Key: WebSocket instance
+
+// --- Per-agent outbound queue helpers (design [C]) ---
+
+/**
+ * Send a newline-terminated TCP frame to a managed agent. If the agent's socket
+ * is not currently writable, enqueue it (bounded FIFO) and flush in order once
+ * the agent (re)connects. Never silently drops: on cap overflow the OLDEST frame
+ * is dropped with a warning.
+ */
+function sendToAgent(agent: ManagedAgent, frame: object): void {
+    const line = JSON.stringify(frame) + '\n';
+    const socket = agent.localSocket;
+    if (socket && !socket.destroyed && socket.writable && agent.status === 'running') {
+        socket.write(line);
+        return;
+    }
+    // Not writable — enqueue for later delivery.
+    if (agent.outboundQueue.length >= AGENT_OUTBOUND_QUEUE_CAP) {
+        agent.outboundQueue.shift(); // drop oldest
+        logger.warn('Agent outbound queue full — dropping oldest frame', {
+            agentId: agent.globalAgentId,
+            cap: AGENT_OUTBOUND_QUEUE_CAP
+        });
+        metrics.increment('agent_outbound_dropped');
+    }
+    agent.outboundQueue.push(line);
+    logger.debug('Enqueued frame for agent (socket not writable)', {
+        agentId: agent.globalAgentId,
+        queued: agent.outboundQueue.length
+    });
+    metrics.increment('agent_outbound_queued');
+}
+
+/** Flush any queued frames to an agent once its socket is writable. */
+function flushAgentQueue(agent: ManagedAgent): void {
+    const socket = agent.localSocket;
+    if (!socket || socket.destroyed || !socket.writable) return;
+    if (agent.outboundQueue.length === 0) return;
+    logger.info('Flushing queued frames to agent', {
+        agentId: agent.globalAgentId,
+        count: agent.outboundQueue.length
+    });
+    while (agent.outboundQueue.length > 0) {
+        const line = agent.outboundQueue.shift()!;
+        socket.write(line);
+        metrics.increment('agent_outbound_flushed');
+    }
+}
 
 // --- Agent Lifecycle Management ---
 
@@ -78,6 +159,7 @@ function spawnAgent(globalAgentId: string): void {
         status: 'starting',
         commanderId: null, // Initially unassigned
         globalAgentId: globalAgentId,
+        outboundQueue: [],
     };
     managedAgents.set(globalAgentId, agent);
     metrics.increment('agents_spawned');
@@ -137,85 +219,170 @@ function terminateAgent(globalAgentId: string): void {
     }
 }
 
-// --- WebSocket Server (for Orchestrator, Squad Leaders) ---
+// --- Coordinator -> Agent command routing ---
+// Shared by both the inbound WS server handler and the upstream client handler so
+// commands behave identically regardless of which side initiated the connection.
+// Payloads are validated (design [E]) and undeliverable frames are queued (design [C]).
+function routeCoordinatorMessage(
+    parsedMessage: { type: string; payload?: unknown },
+    commanderId: string
+): void {
+    switch (parsedMessage.type) {
+        case MsgType.AgentCommand: {
+            const validated = validatePayload(agentCommandPayloadSchema, parsedMessage.payload);
+            if (!validated.ok) {
+                logger.warn('Dropping invalid agentCommand payload', { error: validated.error });
+                metrics.increment('ws_invalid_payloads');
+                return;
+            }
+            const { agentId, taskId, task, completionCondition } = validated.value as {
+                agentId: string;
+                taskId: string;
+                task: { type: string };
+                completionCondition?: unknown;
+            };
+            const agent = managedAgents.get(agentId);
+            if (!agent) {
+                logger.warn(`Cannot route command to agent ${agentId}: Agent not found.`);
+                return;
+            }
+            if (agent.commanderId !== commanderId) {
+                logger.info(`Assigning commander ${commanderId} to agent ${agentId}`);
+                agent.commanderId = commanderId;
+            }
+            logger.info(`Routing command (Task: ${task.type}) to Agent ${agentId}`);
+            sendToAgent(agent, {
+                type: TcpMsgType.Command,
+                payload: { taskId, task, completionCondition }
+            });
+            break;
+        }
+        case MsgType.SpawnAgent: {
+            const payload = (parsedMessage.payload ?? {}) as { agentId?: string };
+            if (payload.agentId) {
+                spawnAgent(payload.agentId);
+            } else {
+                logger.error('spawnAgent message missing agentId');
+            }
+            break;
+        }
+        case MsgType.TerminateAgent: {
+            const payload = (parsedMessage.payload ?? {}) as { agentId?: string };
+            if (payload.agentId) {
+                terminateAgent(payload.agentId);
+            } else {
+                logger.error('terminateAgent message missing agentId');
+            }
+            break;
+        }
+        case MsgType.UpdateProfile: {
+            const validated = validatePayload(updateProfilePayloadSchema, parsedMessage.payload);
+            if (!validated.ok) {
+                logger.warn('Dropping invalid updateProfile payload', { error: validated.error });
+                metrics.increment('ws_invalid_payloads');
+                return;
+            }
+            const { agentId, profile } = validated.value as { agentId: string; profile?: unknown };
+            const agent = managedAgents.get(agentId);
+            if (!agent) {
+                logger.warn(`Cannot route profile update to agent ${agentId}: Agent not found.`);
+                return;
+            }
+            logger.info(`Routing profile update to Agent ${agentId}`);
+            sendToAgent(agent, { type: TcpMsgType.UpdateProfile, payload: profile });
+            break;
+        }
+        case MsgType.CancelTask: {
+            const validated = validatePayload(cancelTaskPayloadSchema, parsedMessage.payload);
+            if (!validated.ok) {
+                logger.warn('Dropping invalid cancelTask payload', { error: validated.error });
+                metrics.increment('ws_invalid_payloads');
+                return;
+            }
+            const { agentId, taskId } = validated.value as { agentId: string; taskId?: string };
+            const agent = managedAgents.get(agentId);
+            if (!agent) {
+                logger.warn(`Cannot route cancelTask to agent ${agentId}: Agent not found.`);
+                return;
+            }
+            logger.info(`Routing cancelTask to Agent ${agentId} (task: ${taskId})`);
+            sendToAgent(agent, { type: TcpMsgType.CancelTask, payload: { taskId } });
+            break;
+        }
+        case MsgType.ChatMessage: {
+            const validated = validatePayload(chatMessagePayloadSchema, parsedMessage.payload);
+            if (!validated.ok) {
+                logger.warn('Dropping invalid chatMessage payload', { error: validated.error });
+                metrics.increment('ws_invalid_payloads');
+                return;
+            }
+            const { agentId, message: chatMsg } = validated.value as {
+                agentId?: string;
+                message: string;
+            };
+            if (!agentId) {
+                logger.warn('Cannot route chat message: payload missing agentId.');
+                return;
+            }
+            const agent = managedAgents.get(agentId);
+            if (!agent) {
+                logger.warn(`Cannot route chat message to agent ${agentId}: Agent not found.`);
+                return;
+            }
+            logger.info(`Routing chat message to Agent ${agentId}`);
+            sendToAgent(agent, { type: TcpMsgType.ChatMessage, payload: { message: chatMsg } });
+            break;
+        }
+        default:
+            // Unrecognized coordinator message type — ignore.
+            break;
+    }
+}
+
+// --- WebSocket Server (for the Coordinator) ---
 const wss = new WebSocketServer({ port: WS_PORT });
 logger.info(`BSM WebSocket server listening on port ${WS_PORT}`);
 
 wss.on('connection', (ws: WebSocket) => {
     logger.debug('WS Client connected');
     metrics.increment('ws_connections');
-    // TODO: Implement authentication/identification handshake
-    // For now, assume first message identifies the client
+    // First message must be a coordinator registration.
 
     ws.on('message', (message: Buffer) => {
-        try {
-            const parsedMessage: WebSocketMessage = JSON.parse(message.toString());
-            logger.info(`Received WS message type: ${parsedMessage.type} from ${parsedMessage.senderId}`);
+        // --- Boundary validation (design [E]) ---
+        const parsed = parseWsMessage(message);
+        if (!parsed.ok) {
+            logger.warn('Dropping invalid WS message from client', { error: parsed.error });
+            metrics.increment('ws_invalid_messages');
+            return;
+        }
+        const parsedMessage = parsed.value;
+        logger.info(`Received WS message type: ${parsedMessage.type} from ${parsedMessage.senderId}`);
 
-            // --- Client Identification ---
-            if (!connectedWSClients.has(ws)) {
-                 if (parsedMessage.type === 'orchestrator::register' || parsedMessage.type === 'squadLeader::register') {
-                    const clientId = parsedMessage.senderId;
-                    if (!clientId) {
-                        logger.error('Registration message missing senderId');
-                        ws.close(1008, 'Missing senderId');
-                        return;
-                    }
-                    const clientType = parsedMessage.type.startsWith('orchestrator') ? 'orchestrator' : 'squadLeader';
-                    connectedWSClients.set(ws, { ws, type: clientType, id: clientId });
-                    logger.info(`${clientType} registered: ${clientId}`);
-                    // Send confirmation?
-                    // ws.send(JSON.stringify({ type: 'bsm::registerAck', payload: { bsmId: BSM_ID } }));
-                    return; // Don't process registration message further
-                } else {
-                    logger.error('First message from client was not registration');
-                    ws.close(1008, 'Registration required');
+        // --- Client Identification ---
+        if (!connectedWSClients.has(ws)) {
+            if (parsedMessage.type === MsgType.BsmRegister) {
+                const clientId = parsedMessage.senderId;
+                if (!clientId) {
+                    logger.error('Registration message missing senderId');
+                    ws.close(1008, 'Missing senderId');
                     return;
                 }
+                connectedWSClients.set(ws, { ws, type: 'coordinator', id: clientId });
+                logger.info(`coordinator registered: ${clientId}`);
+                return; // Don't process registration message further
+            } else {
+                logger.error('First message from client was not registration');
+                ws.close(1008, 'Registration required');
+                return;
             }
-
-            const clientInfo = connectedWSClients.get(ws);
-            if (!clientInfo) return; // Should not happen after registration check
-
-            // --- Message Routing (WS -> Agent) ---
-            if (parsedMessage.type === 'squadLeader::agentCommand' || parsedMessage.type === 'orchestrator::agentCommand') {
-                const { agentId, taskId, task } = parsedMessage.payload;
-                const agent = managedAgents.get(agentId);
-
-                if (agent && agent.localSocket && agent.status === 'running') {
-                    logger.info(`Routing command ${parsedMessage.type} (Task: ${task.type}) to Agent ${agentId}`);
-                    // Assign commander if not already set or changed
-                    if (agent.commanderId !== clientInfo.id) {
-                        logger.info(`Assigning commander ${clientInfo.id} to agent ${agentId}`);
-                        agent.commanderId = clientInfo.id;
-                    }
-                    // Forward the command payload over TCP to the specific agent
-                    const messageToSend = JSON.stringify({ type: 'command', payload: { taskId, task } });
-                    agent.localSocket.write(messageToSend + '\n'); // Add newline as delimiter
-                } else {
-                    logger.warn(`Cannot route command to agent ${agentId}: Agent not found, not connected via TCP, or not running.`);
-                    // TODO: Send error back to commander?
-                }
-            } else if (parsedMessage.type === 'orchestrator::spawnAgent') {
-                 const { agentId: agentToSpawn } = parsedMessage.payload;
-                 if (agentToSpawn) {
-                     spawnAgent(agentToSpawn);
-                 } else {
-                     logger.error('orchestrator::spawnAgent message missing agentId');
-                 }
-            } else if (parsedMessage.type === 'orchestrator::terminateAgent') {
-                 const { agentId: agentToTerminate } = parsedMessage.payload;
-                 if (agentToTerminate) {
-                     terminateAgent(agentToTerminate);
-                 } else {
-                      logger.error('orchestrator::terminateAgent message missing agentId');
-                 }
-            }
-            // Add handlers for other WS message types if needed
-
-        } catch (error) {
-            logger.error('Failed to parse WS message or handle:', error);
         }
+
+        const clientInfo = connectedWSClients.get(ws);
+        if (!clientInfo) return; // Should not happen after registration check
+
+        // --- Message Routing (WS -> Agent) ---
+        routeCoordinatorMessage(parsedMessage, clientInfo.id);
     });
 
     ws.on('close', () => {
@@ -259,95 +426,138 @@ const tcpServer = net.createServer((socket: net.Socket) => {
         while (boundary !== -1) {
             const messageString = buffer.substring(0, boundary);
             buffer = buffer.substring(boundary + 1);
+            boundary = buffer.indexOf('\n'); // Pre-advance so `continue` is safe.
 
-            try {
-                const message: AgentEvent | AgentStatusSnapshot | { type: 'register', payload: { agentId: string } } = JSON.parse(messageString);
-                // Log based on identified type
-                if ('type' in message && message.type === 'register') {
-                    logger.info(`Received TCP message type: register from Agent ${associatedAgentId || 'Unknown'}`);
-                } else if ('eventType' in message) {
-                     logger.info(`Received TCP message type: AgentEvent (${message.eventType}) from Agent ${associatedAgentId}`);
-                } else if ('status' in message) { // Assuming AgentStatusSnapshot has a 'status' field
-                     logger.info(`Received TCP message type: AgentStatusSnapshot from Agent ${associatedAgentId}`);
-                } else {
-                     logger.info(`Received unknown TCP message structure from Agent ${associatedAgentId || 'Unknown'}`);
+            // --- Boundary validation (design [E]) ---
+            const parsed = parseTcpMessage(messageString);
+            if (!parsed.ok) {
+                logger.warn('Dropping invalid TCP frame from agent', {
+                    agentId: associatedAgentId || 'Unknown',
+                    error: parsed.error
+                });
+                metrics.increment('tcp_invalid_messages');
+                continue;
+            }
+            const message = parsed.value;
+            // The envelope is { v?, type, payload? }; richer agent payloads (events,
+            // status snapshots) carry their fields inside `payload`.
+            const payload = (message.payload ?? {}) as Record<string, unknown>;
+            logger.info(`Received TCP message type: ${message.type} from Agent ${associatedAgentId || 'Unknown'}`);
+
+            // --- Agent Identification & Routing Logic ---
+            if (!agentIdentified) {
+                // Expecting registration message first.
+                if (message.type !== TcpMsgType.Register) {
+                    logger.warn('Received non-registration message before agent identification. Ignoring message.');
+                    continue;
                 }
 
-                // --- Agent Identification & Routing Logic ---
-                if (!agentIdentified) {
-                    // Expecting registration message first
-                    if ('type' in message && message.type === 'register' && 'payload' in message && message.payload.agentId) {
-                        const potentialId = message.payload.agentId;
-                        const agent = managedAgents.get(potentialId);
-                        if (agent && !agent.localSocket) { // Check if agent exists and isn't already associated
-                            associatedAgentId = potentialId;
-                            agent.localSocket = socket;
-                            agent.status = 'running'; // Mark as running once TCP connection is established
-                            agentIdentified = true; // Mark as identified
-                            if (identificationTimeout) clearTimeout(identificationTimeout); // Clear timeout
-                            logger.info(`Agent ${associatedAgentId} successfully registered and identified.`);
-                            // Send ack
-                            socket.write(JSON.stringify({ type: 'bsm::registerAck', payload: { status: 'Registered' } }) + '\n');
-                        } else {
-                            logger.error(`Registration failed for agent ${potentialId}. Agent not managed by this BSM or already connected.`);
-                            if (identificationTimeout) clearTimeout(identificationTimeout);
-                            socket.end(); // Disconnect unidentified or duplicate agent
-                            return; // Stop processing this message chunk
-                        }
-                    } else {
-                        // Received a non-registration message before identification
-                        logger.warn('Received non-registration message before agent identification. Ignoring message.');
-                        // Optionally close connection if strict identification is required first:
-                        // if (identificationTimeout) clearTimeout(identificationTimeout);
-                        // socket.end();
-                        // return;
-                    }
+                // Validate the register payload (design [E]) and auth (design [D]).
+                const validated = validatePayload(agentRegisterPayloadSchema, message.payload);
+                if (!validated.ok) {
+                    logger.warn('Dropping invalid agent register payload', { error: validated.error });
+                    metrics.increment('tcp_invalid_payloads');
+                    continue;
+                }
+                const regPayload = validated.value as { agentId: string; authToken?: string };
+
+                if (!checkAuthToken(config.CLUSTER_AUTH_TOKEN, regPayload.authToken)) {
+                    logger.warn('Agent auth failed — closing TCP connection', {
+                        agentId: regPayload.agentId
+                    });
+                    metrics.increment('agent_auth_failures');
+                    if (identificationTimeout) clearTimeout(identificationTimeout);
+                    socket.destroy();
+                    return;
+                }
+
+                const potentialId = regPayload.agentId;
+                let agent = managedAgents.get(potentialId);
+
+                // Auto-register externally started agents.
+                if (!agent) {
+                    logger.info(`Auto-registering external agent: ${potentialId}`);
+                    managedAgents.set(potentialId, {
+                        process: null as any,
+                        localSocket: null,
+                        status: 'starting',
+                        commanderId: 'coordinator',
+                        globalAgentId: potentialId,
+                        outboundQueue: [],
+                    });
+                    agent = managedAgents.get(potentialId)!;
+                    // Re-register with coordinator to include the new agent.
+                    registerWithCoordinator();
+                }
+
+                if (agent && !agent.localSocket) {
+                    associatedAgentId = potentialId;
+                    agent.localSocket = socket;
+                    agent.status = 'running'; // Mark as running once TCP connection is established
+                    agentIdentified = true; // Mark as identified
+                    if (identificationTimeout) clearTimeout(identificationTimeout); // Clear timeout
+                    logger.info(`Agent ${associatedAgentId} successfully registered and identified.`);
+                    // Send ack.
+                    socket.write(JSON.stringify({ type: TcpMsgType.RegisterAck, payload: { status: 'Registered' } }) + '\n');
+                    // Flush any frames that queued up while the agent was unreachable (design [C]).
+                    flushAgentQueue(agent);
                 } else {
-                    // Agent is already identified, proceed with message routing
-                    if (!associatedAgentId) {
-                        // This state should ideally not be reachable if agentIdentified is true
-                        logger.error('Internal state error: Agent identified flag is true but associatedAgentId is null.');
-                        if (identificationTimeout) clearTimeout(identificationTimeout);
-                        socket.end(); // Close potentially problematic connection
-                        return;
-                    }
-
-                    const agent = managedAgents.get(associatedAgentId); // Now safe to use associatedAgentId
-                    if (!agent) {
-                        logger.error(`Agent ${associatedAgentId} was identified but not found in managedAgents map. This might happen if terminated concurrently.`);
-                        return; // Stop processing if agent is gone
-                    }
-
-                    // --- Message Routing (Agent -> WS / World State) ---
-                    if ('destination' in message) {
-                        switch (message.destination) {
-                            case 'world_state_service':
-                                // Ensure it's an AgentEvent before forwarding
-                                if ('eventType' in message) {
-                                    forwardToWorldState(message);
-                                } else {
-                                    logger.warn(`Received message for world_state_service without eventType from ${associatedAgentId}`);
-                                }
-                                break;
-                            case 'orchestrator':
-                            case agent.commanderId: // Route to current commander (Squad Leader or Orchestrator)
-                                if (agent.commanderId === message.destination || message.destination === 'orchestrator') {
-                                    forwardToCommander(message, message.destination);
-                                } else {
-                                     logger.warn(`Message from ${associatedAgentId} has destination ${message.destination} which does not match current commander ${agent.commanderId}`);
-                                }
-                                break;
-                            default:
-                                logger.warn(`Unknown destination '${message.destination}' for message from agent ${associatedAgentId}`);
-                        }
-                    } else {
-                         logger.warn(`Message from agent ${associatedAgentId} missing destination field.`);
-                    }
-                } // End of identified agent message handling
-            } catch (error) {
-                logger.error('Failed to parse TCP message or handle:', error, `\nRaw data part: ${messageString}`);
+                    logger.error(`Registration failed for agent ${potentialId}. Already connected.`);
+                    if (identificationTimeout) clearTimeout(identificationTimeout);
+                    socket.end();
+                    return;
+                }
+                continue;
             }
-            boundary = buffer.indexOf('\n'); // Check for next message in buffer
+
+            // --- Agent is identified — route its message ---
+            if (!associatedAgentId) {
+                // This state should ideally not be reachable if agentIdentified is true.
+                logger.error('Internal state error: Agent identified flag is true but associatedAgentId is null.');
+                if (identificationTimeout) clearTimeout(identificationTimeout);
+                socket.end(); // Close potentially problematic connection
+                return;
+            }
+
+            const agent = managedAgents.get(associatedAgentId); // Now safe to use associatedAgentId
+            if (!agent) {
+                logger.error(`Agent ${associatedAgentId} was identified but not found in managedAgents map. This might happen if terminated concurrently.`);
+                continue; // Stop processing this frame if agent is gone
+            }
+
+            // --- Command ack relay (design [A] step 4) ---
+            // Forward the agent's immediate accept/reject upstream to the coordinator.
+            // queueUpstream sends immediately if the WS is open, else buffers it.
+            if (message.type === TcpMsgType.CommandAck) {
+                queueUpstream(makeWsMessage(MsgType.AgentCommandAck, message.payload, BSM_ID));
+                metrics.increment('command_acks_relayed');
+                continue;
+            }
+
+            // --- Message Routing (Agent -> WS / World State) ---
+            // Agent events/status snapshots live inside `payload` and carry a `destination`.
+            const destination = payload.destination as string | undefined;
+            if (destination) {
+                switch (destination) {
+                    case 'world_state_service':
+                        if ('eventType' in payload) {
+                            forwardToWorldState(payload as unknown as AgentEvent);
+                        } else {
+                            logger.warn(`Received message for world_state_service without eventType from ${associatedAgentId}`);
+                        }
+                        break;
+                    case 'orchestrator':
+                    case 'coordinator':
+                    case 'commander':
+                    case agent.commanderId:
+                        forwardToCommander(payload as unknown as AgentEvent | AgentStatusSnapshot, agent.commanderId || 'coordinator');
+                        break;
+                    default:
+                        logger.warn(`Unknown destination '${destination}' for message from agent ${associatedAgentId}`);
+                }
+            } else {
+                logger.warn(`Message from agent ${associatedAgentId} missing destination field.`);
+            }
         } // End while loop
     });
 
@@ -378,17 +588,137 @@ tcpServer.listen(LOCAL_AGENT_PORT, () => {
     logger.info('BSM TCP server listening for agents', { port: LOCAL_AGENT_PORT });
 });
 
+// --- Upstream WebSocket Client (BSM -> Coordinator) ---
+let upstreamWs: WebSocket | null = null;
+let upstreamReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+// Bounded buffer for upstream->coordinator frames while the WS is down (design [C]).
+const upstreamQueue: string[] = [];
+
+/** (Re)register this BSM with the coordinator if the upstream WS is open. */
+function registerWithCoordinator(): void {
+    if (!upstreamWs || upstreamWs.readyState !== WebSocket.OPEN) return;
+    const agentList = Array.from(managedAgents.entries()).map(([id, a]) => ({
+        agentId: id,
+        status: a.status,
+    }));
+    const registerMsg = makeWsMessage(
+        MsgType.BsmRegister,
+        {
+            bsmId: BSM_ID,
+            address: `ws://localhost:${WS_PORT}`,
+            capacity: 10,
+            agents: agentList,
+            authToken: config.CLUSTER_AUTH_TOKEN,
+        },
+        BSM_ID
+    );
+    upstreamWs.send(JSON.stringify(registerMsg));
+    logger.info('BSM (re)registered with coordinator', {
+        bsmId: BSM_ID,
+        agents: agentList.length
+    });
+}
+
+/**
+ * Send a frame upstream to the coordinator. If the WS is not open, buffer it
+ * (bounded FIFO; oldest dropped with a warning on overflow) and flush on reconnect.
+ */
+function queueUpstream(frame: object): void {
+    const line = JSON.stringify(frame);
+    if (upstreamWs && upstreamWs.readyState === WebSocket.OPEN) {
+        upstreamWs.send(line);
+        return;
+    }
+    if (upstreamQueue.length >= UPSTREAM_QUEUE_CAP) {
+        upstreamQueue.shift();
+        logger.warn('Upstream queue full — dropping oldest frame', { cap: UPSTREAM_QUEUE_CAP });
+        metrics.increment('upstream_dropped');
+    }
+    upstreamQueue.push(line);
+    metrics.increment('upstream_queued');
+}
+
+/** Flush buffered upstream frames once the coordinator WS is open again. */
+function flushUpstreamQueue(): void {
+    if (!upstreamWs || upstreamWs.readyState !== WebSocket.OPEN) return;
+    if (upstreamQueue.length === 0) return;
+    logger.info('Flushing buffered upstream frames to coordinator', { count: upstreamQueue.length });
+    while (upstreamQueue.length > 0) {
+        upstreamWs.send(upstreamQueue.shift()!);
+        metrics.increment('upstream_flushed');
+    }
+}
+
+function connectToCoordinator(): void {
+    if (upstreamWs && (upstreamWs.readyState === WebSocket.OPEN || upstreamWs.readyState === WebSocket.CONNECTING)) {
+        return;
+    }
+
+    logger.info(`Connecting to coordinator at ${COORDINATOR_ADDRESS}...`);
+    upstreamWs = new WebSocket(COORDINATOR_ADDRESS);
+
+    upstreamWs.on('open', () => {
+        logger.info('Connected to coordinator');
+        // Register this BSM with the coordinator.
+        registerWithCoordinator();
+        // Also register the upstream connection as the coordinator client in
+        // connectedWSClients so forwardToCommander can find it.
+        connectedWSClients.set(upstreamWs!, { ws: upstreamWs!, type: 'coordinator', id: 'coordinator' });
+        // Flush anything buffered while we were disconnected.
+        flushUpstreamQueue();
+    });
+
+    upstreamWs.on('message', (data: Buffer) => {
+        // --- Boundary validation (design [E]) ---
+        const parsed = parseWsMessage(data);
+        if (!parsed.ok) {
+            logger.warn('Dropping invalid upstream message', { error: parsed.error });
+            metrics.increment('ws_invalid_messages');
+            return;
+        }
+        logger.info(`Received upstream message: ${parsed.value.type}`);
+        // Same routing as the inbound WS server handler.
+        routeCoordinatorMessage(parsed.value, 'coordinator');
+    });
+
+    upstreamWs.on('close', () => {
+        logger.warn('Upstream coordinator connection closed');
+        connectedWSClients.delete(upstreamWs!);
+        upstreamWs = null;
+        scheduleReconnect();
+    });
+
+    upstreamWs.on('error', (error: Error) => {
+        logger.error('Upstream coordinator connection error', { error: error.message });
+        // close event will fire after this, triggering reconnect
+    });
+}
+
+function scheduleReconnect(): void {
+    if (upstreamReconnectTimer) return;
+    upstreamReconnectTimer = setTimeout(() => {
+        upstreamReconnectTimer = null;
+        connectToCoordinator();
+    }, 3000);
+}
+
+// Start upstream connection after a short delay to let the local servers initialize
+setTimeout(() => connectToCoordinator(), 500);
+
 // --- Health Check Setup ---
 const healthCheck = new HealthCheck('bot-server-manager', '0.1.0');
 
-healthCheck.registerDependency('orchestrator', async () => {
-    // Check if orchestrator WebSocket is connected
+healthCheck.registerDependency('coordinator', async () => {
+    if (upstreamWs && upstreamWs.readyState === WebSocket.OPEN) {
+        return { status: 'connected' };
+    }
+    // Fallback: check if the coordinator connected to us via the WS server.
     for (const client of connectedWSClients.values()) {
-        if (client.type === 'orchestrator') {
+        if (client.type === 'coordinator') {
             return { status: 'connected' };
         }
     }
-    return { status: 'disconnected', error: 'No orchestrator connection' };
+    return { status: 'disconnected', error: 'No coordinator connection' };
 });
 
 healthCheck.registerDependency('world-state-service', async () => {
@@ -515,22 +845,26 @@ function forwardToCommander(message: AgentEvent | AgentStatusSnapshot, commander
         }
     }
 
+    // Build the versioned WS envelope using protocol constants.
+    const wsType = 'eventType' in message
+        ? agentEventType(message.eventType)
+        : MsgType.AgentStatusUpdate;
+    const wsMessage = makeWsMessage(wsType, message, BSM_ID);
+
     if (targetClient && targetClient.ws.readyState === WebSocket.OPEN) {
-        // Construct the WebSocket message to forward
-        const wsMessage: WebSocketMessage = {
-            // Use type guard to construct the correct type string
-            type: 'eventType' in message ? `agent::event::${message.eventType}` : `agent::statusUpdate`,
-            payload: message, // Forward the original agent message payload
-            senderId: BSM_ID // Identify this BSM as the forwarder
-        };
         targetClient.ws.send(JSON.stringify(wsMessage));
         metrics.increment('messages_forwarded_to_commander');
+    } else if (commanderId === 'coordinator') {
+        // The coordinator is our upstream — buffer the frame so it is delivered on
+        // reconnect rather than silently dropped (design [C]).
+        logger.warn('Coordinator not reachable — buffering forwarded frame', { commanderId });
+        queueUpstream(wsMessage);
+        metrics.increment('message_forwarding_buffered');
     } else {
         logger.warn('Cannot forward message to commander: Client not found or connection not open', {
           commanderId
         });
         metrics.increment('message_forwarding_failures');
-        // TODO: Handle undeliverable message? Queue? Notify agent?
     }
 }
 

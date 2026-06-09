@@ -1,7 +1,0 @@
-node_modules/
-dist/
-yarn-*
-yarn.lock
-package-lock.json
-vscode-profile-*
-flamegraph.htm

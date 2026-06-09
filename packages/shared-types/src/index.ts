@@ -26,6 +26,16 @@ export type TaskType =
   | "ManageContainer"
   | "NavigateTo";
 
+// --- Completion Conditions ---
+export type CompletionCondition =
+  | { type: 'inventory_has'; item: string; count: number }
+  | { type: 'at_position'; position: Coordinates; radius: number }
+  | { type: 'time_elapsed'; seconds: number }
+  | { type: 'entity_eliminated'; entityType: string; radius: number }
+  | { type: 'structure_found'; structureType: string }
+  | { type: 'area_cleared'; radius: number }
+  | { type: 'indefinite' };
+
 // Using a union type for details based on the task type
 export type TaskDetails =
   | GatherDetails
@@ -129,7 +139,7 @@ export interface AgentEvent {
   eventType: AgentEventType;
   timestamp: string; // ISO8601 format
   details: AgentEventDetails;
-  destination: string; // squadLeaderId or "orchestrator" or "world_state_service"
+  destination: string; // "coordinator" or "world_state_service"
 }
 
 export type AgentEventType =
@@ -144,7 +154,9 @@ export type AgentEventType =
   | "statusUpdate" // Generic status change
   | "taskRejected" // If agent cannot perform task
   | "agentLostConnection" // Added for Squad Leader error handling
-  | "commandSendFailed"; // Added for Squad Leader error handling
+  | "commandSendFailed" // Added for Squad Leader error handling
+  | "playerChat" // Player said something in Minecraft chat
+  | "behaviorAlert"; // Behavior layer preemption alert
 
 export type AgentEventDetails =
   | TaskCompleteDetails
@@ -156,7 +168,9 @@ export type AgentEventDetails =
   | TookDamageDetails
   | InventoryUpdateDetails
   | StatusUpdateDetails
-  | TaskRejectedDetails;
+  | TaskRejectedDetails
+  | PlayerChatDetails
+  | BehaviorAlertDetails;
 
 // --- Specific Event Detail Interfaces ---
 
@@ -217,12 +231,22 @@ export interface TaskRejectedDetails {
     reason: string; // e.g., "Missing materials", "Invalid target"
 }
 
+export interface PlayerChatDetails {
+    playerName: string;
+    message: string;
+}
+
+export interface BehaviorAlertDetails {
+    alertType: string; // e.g., "health_low", "player_detected", "agent_death"
+    [key: string]: any; // alert-specific payload
+}
+
 
 // --- Agent Status Update (Periodic) ---
 
 /**
  * Represents a periodic status update from an agent, distinct from events.
- * Used for Squad Leader context building.
+ * Used for coordinator context building.
  */
 export interface AgentStatusSnapshot {
   agentId: string;
@@ -244,16 +268,19 @@ export interface AgentStatusSnapshot {
     // Recent significant events (limited list for context)
     recentEvents?: string[]; // e.g., ["Took 5 damage", "Detected Skeleton"]
   };
-  destination: string; // squadLeaderId or "orchestrator"
+  destination: string; // "coordinator"
 }
 
 // --- WebSocket Message Structure ---
 
 /**
  * Generic structure for WebSocket messages between services.
+ * Use the `MsgType` constants and `parseWsMessage`/`makeWsMessage` helpers
+ * from `./protocol` rather than hand-writing type strings.
  */
 export interface WebSocketMessage<T = any> {
-    type: string; // e.g., "squadLeader::init", "agent::event::taskComplete"
+    v?: number; // Optional: protocol version (see PROTOCOL_VERSION)
+    type: string; // e.g., "coordinator::agentCommand", "agent::event::taskComplete"
     payload: T;
     senderId?: string; // Optional: ID of the sending service/instance
     timestamp?: string; // Optional: ISO8601
@@ -328,6 +355,7 @@ export interface AgentCommandObject {
     agentId: string;
     taskId: string; // Unique ID for this specific command instance
     task: TaskObject;
+    completionCondition?: CompletionCondition;
 }
 // --- Utility Exports ---
 export * from './logger';
@@ -340,3 +368,4 @@ export * from './metrics';
 export * from './shutdown';
 export * from './llm-cache';
 export * from './health';
+export * from './protocol';
