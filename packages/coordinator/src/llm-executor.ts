@@ -131,19 +131,12 @@ export async function executeTool(name: string, args: any, ctx: ToolContext): Pr
     }
 
     case 'messagePlayer': {
-      // ALWAYS mirror the reply to the web frontend first so web users see it
-      // even when no in-game agent is connected to relay it into Minecraft.
+      // Coordinator replies go to the WEB chat ONLY — they are NOT echoed into
+      // in-game Minecraft chat. The bots should not spam server chat, and the
+      // web frontend is the conversation surface. (mineflayer chat-send is also
+      // unreliable on 1.21.11.)
       ctx.notifyChat?.(args.message);
-
-      // Best-effort: also speak it in-game via any available agent. Do not fail
-      // the tool if none is connected — the web user already received the reply.
-      const anyAgent = agents.getAllAgents().find(a => a.status !== 'unknown');
-      const sentInGame = anyAgent ? agents.sendChatMessage(anyAgent.agentId, args.message) : false;
-
-      return {
-        success: true,
-        status: sentInGame ? 'Message sent (in-game + web)' : 'Message sent (web only — no in-game agent)',
-      };
+      return { success: true, status: 'Message sent (web)' };
     }
 
     default:
