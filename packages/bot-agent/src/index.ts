@@ -353,8 +353,15 @@ bsm.on('cancelTask', (taskId: string) => {
 });
 
 bsm.on('chatMessage', (message: string) => {
-  if (bot) {
+  // The coordinator routes replies to the web frontend only (not in-game), so
+  // this rarely fires. Keep it defensive regardless: mineflayer's chat-send can
+  // throw on some protocol versions (e.g. 1.21.11: "bot._client.chat is not a
+  // function") and must NEVER take down the agent process.
+  if (!bot) return;
+  try {
     bot.chat(message);
+  } catch (err) {
+    logger.warn('In-game chat send failed (ignored):', err instanceof Error ? err.message : String(err));
   }
 });
 

@@ -157,13 +157,29 @@ export class TaskManager {
       conditionCheckInterval: null,
     };
 
-    // Activate module
+    // Activate module. A module may SYNCHRONOUSLY emit 'complete'/'failed'
+    // during activate() (e.g. a fast-failing gather, or a bad task param like an
+    // unknown block type). That fires the handlers above and nulls this.currentTask
+    // before activate() even returns — so a thrown error here, or dereferencing
+    // currentTask afterward, must not crash the whole agent process.
     logger.info(`Activating ${moduleName} for task ${taskId} (${task.type})`);
     const params = this.mapTaskToParams(task);
-    module.activate(params);
+    try {
+      module.activate(params);
+    } catch (err) {
+      const reason = `Module activation error: ${err instanceof Error ? err.message : String(err)}`;
+      logger.error(reason);
+      this.clearConditionCheck();
+      this.currentTask = null;
+      this.bsm.reportEvent({ eventType: 'taskFailed', taskId, details: { reason } });
+      return { accepted: false, reason };
+    }
 
-    // Set up completion condition check (if provided and not indefinite)
-    if (completionCondition && completionCondition.type !== 'indefinite') {
+    // Set up completion condition check (if provided and not indefinite).
+    // Guard on this.currentTask: if the module already finished synchronously
+    // above, currentTask is null and the taskComplete/taskFailed event already
+    // fired — there is nothing left to attach a condition evaluator to.
+    if (this.currentTask && completionCondition && completionCondition.type !== 'indefinite') {
       const evaluator = new ConditionEvaluator(this.bot, completionCondition, this.structureDetector ?? undefined);
       this.currentTask.conditionEvaluator = evaluator;
 
